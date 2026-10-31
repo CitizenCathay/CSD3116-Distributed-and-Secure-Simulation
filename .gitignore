@@ -1,1 +1,12 @@
 CSD3116 _ Week 01 _ Team Lab _ V0.2.pdf
+
+# Generated from messages.idl by idlc - run `make` or `idlc -l c messages.idl`
+messages.h
+messages.c
+
+# Build output
+server
+client
+test_security
+test_game_logic
+*.o

@@ -23,7 +23,7 @@ server: server.c security.c game_logic.c messages.c
 
 client: client.c security.c game_logic.c messages.c
 	$(CC) client.c security.c game_logic.c messages.c -o client \
-		$(CFLAGS_GLFW) -lGL $(CFLAGS_DDS) $(LIBS_DDS) -pthread -lm
+		$(CFLAGS_GLFW) -lGL $(LIBS_GLFW) $(CFLAGS_DDS) $(LIBS_DDS) -pthread -lm
 
 test_security: test_security.c security.c
 	$(CC) test_security.c security.c -o test_security
