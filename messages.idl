@@ -1,0 +1,40 @@
+//idlc -l c messages.idl
+
+struct JoinRequest
+{
+	boolean b_dummy;
+	// Credential presented for authentication - see security.h
+	// Length must match SECURITY_TOKEN_LEN in security.h
+	char arr_token[32];
+};
+
+struct JoinResponse
+{
+	//IDL needs int width to be clearly defined
+    long int_player_id;
+};
+
+struct Input
+{
+	long int_player_id;
+    char ch_direction;
+	// Encrypted copy of this message's payload - see security.h
+	// len_cipher == 0 means encryption is not in use (fall back to the
+	// plaintext fields above); arr_cipher size must match
+	// SECURITY_CIPHERTEXT_LEN in security.h
+	octet arr_cipher[64];
+	unsigned long len_cipher;
+};
+
+struct Position
+{
+	long int_player_id;
+	long int_x;
+	long int_y;
+	// Encrypted copy of this message's payload - see security.h
+	// len_cipher == 0 means encryption is not in use (fall back to the
+	// plaintext fields above); arr_cipher size must match
+	// SECURITY_CIPHERTEXT_LEN in security.h
+	octet arr_cipher[64];
+	unsigned long len_cipher;
+};
