@@ -1,13 +1,19 @@
-/* game_logic.c
-Implementation of game_logic.h. detect_collision() and the move/spawn
+/*****************************************************************************
+\file game_logic.c
+\author Dr Khoo Teck Ping
+\co-author regine wong (w.shiyuregine@digipen.edu)
+\par Course: CSD3116
+\par Assignment: Week 1 Team Lab
+\date 11/02/2026 (MM/DD/YYYY)
+\brief Implementation of game_logic.h: collision detection, free-slot lookup,
+       random spawn and legal-move checking, with no DDS or GLFW dependency.
+*******************************************************************************/
+/* Implementation of game_logic.h. detect_collision() and the move/spawn
 rules below are extracted verbatim (logic-wise) from server.c so they
 can be built and unit-tested without pulling in DDS. */
 
 #include "game_logic.h"
 #include <stdlib.h>
-
-// How many pixels is one step
-#define STEP 1
 
 bool detect_collision(const Player a_arr_players[], int a_int_arr_len,
 	int a_int_id, int a_int_x, int a_int_y)

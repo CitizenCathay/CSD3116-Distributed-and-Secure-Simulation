@@ -1,5 +1,13 @@
-/* grid_logic.h
-Pure "color the floor" rules shared by server.c and client.c, with no
+/*****************************************************************************
+\file grid_logic.h
+\author regine wong (w.shiyuregine@digipen.edu)
+\par Course: CSD3116
+\par Assignment: Week 1 Team Lab
+\date 11/02/2026 (MM/DD/YYYY)
+\brief Pure "color the floor" declarations: the grid of cell owners, claiming a
+       cell, per-player scores, the winner and the round timer.
+*******************************************************************************/
+/* Pure "color the floor" rules shared by server.c and client.c, with no
 DDS or GLFW dependency so it can be unit-tested on its own (see
 test_grid_logic.c). The window is split into SQ_WIDTH x SQ_WIDTH cells;
 a player claims the cell under the centre of their square. The server
@@ -18,6 +26,9 @@ messages. */
 
 // Owner value of a cell nobody has claimed (player IDs start at 1)
 #define GRID_UNCLAIMED 0
+
+// Length of a round in seconds (the server runs it, the client shows it)
+#define ROUND_SECS 60
 
 // Owner (player ID) of each cell, row-major: index = row * GRID_COLS + col
 typedef struct

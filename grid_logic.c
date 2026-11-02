@@ -1,5 +1,13 @@
-/* grid_logic.c
-Implementation of grid_logic.h. */
+/*****************************************************************************
+\file grid_logic.c
+\author regine wong (w.shiyuregine@digipen.edu)
+\par Course: CSD3116
+\par Assignment: Week 1 Team Lab
+\date 11/02/2026 (MM/DD/YYYY)
+\brief Implementation of grid_logic.h: cell lookup, claiming, scoring, winner and
+       seconds-left calculations, with no DDS or GLFW dependency.
+*******************************************************************************/
+/* Implementation of grid_logic.h. */
 
 #include "grid_logic.h"
 

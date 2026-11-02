@@ -1,3 +1,14 @@
+/*****************************************************************************
+\file server.c
+\author Dr Khoo Teck Ping
+\co-author regine wong (w.shiyuregine@digipen.edu)
+\par Course: CSD3116
+\par Assignment: Week 1 Team Lab
+\date 11/02/2026 (MM/DD/YYYY)
+\brief DDS game server: authenticates joining clients, owns the game state (player
+       positions and the grid of claimed cells), runs the round timer and
+       publishes updates to the clients.
+*******************************************************************************/
 /* gcc -o server server.c security.c game_logic.c grid_logic.c messages.c $(pkg-config --cflags --libs CycloneDDS) */
 
 /* Dr Khoo Teck Ping
@@ -9,7 +20,11 @@
 5. Each client can move itself using the arrow keys
 6. Collision detection among all players and the window is supported */
 
-/* mutex lock/unlock must be matched
+/* Lecture slide references in this file are to "CSD3116 Week 01 Team Lab"
+(Dr Khoo Teck Ping): Slide 7 baseline programs, Slide 10 game state,
+Slide 11 publishing and subscribing, Slide 12 threading, Slide 14 tasks. */
+
+/* mutex lock/unlock must be matched (Slide 12)
 watch out for break out of loop */
 
 #include <stdio.h>
@@ -28,11 +43,10 @@ watch out for break out of loop */
 // ### GLOBAL CONSTANTS ###
 /* An array of one message (aka sample in dds terms) will be used. */
 #define MAX_SAMPLES 1
+// The baseline supports at most five clients (Slide 7)
 #define MAX_PLAYERS 5
 // The round starts once this many players have joined
 #define MIN_PLAYERS 2
-// Length of a round in seconds
-#define ROUND_SECS 60
 
 // ### GLOBAL VARIABLES ###
 int int_num_active_players = 0;
@@ -54,7 +68,14 @@ int int_new_player_nonce = 0;
 
 // Table to track clients
 // Init all members to 0
+// This is the game state, ie the ground truth: only the server updates it,
+// and clients keep a copy from our Position messages. Each entry holds
+// Active/X/Y, and the player ID is the array index plus 1 so a player can
+// be looked up directly (Slide 10, Figure 3)
 static Player arr_Players[MAX_PLAYERS] = {0};
+// Guards the variables shared by the main thread and the DDS worker thread,
+// so neither reads a value while the other is changing it. Every lock must
+// be matched by an unlock (Slide 12)
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Publishes that a cell changed owner (0 = unclaimed)
@@ -121,6 +142,10 @@ static void publish_game_state(dds_entity_t a_writer, int a_int_seconds_left,
 	}
 }
 
+// DDS worker thread (Slide 12): handles all DDS traffic - join requests and
+// responses, input from clients, position/cell/timer updates to clients -
+// so that a delayed message never stalls the main thread's game state
+// maintenance
 void *worker(void *arg)
 {
 	dds_entity_t participant;
@@ -136,15 +161,15 @@ void *worker(void *arg)
 	dds_entity_t cell_writer;
 	dds_entity_t state_writer;
 	dds_entity_t input_reader;
-		
+        
 	//Pointer to unknown type
 	void *samples_join[MAX_SAMPLES];	
 	dds_sample_info_t infos_join[MAX_SAMPLES];
 	void *samples_input[MAX_SAMPLES];	
 	dds_sample_info_t infos_input[MAX_SAMPLES];
-	
+    
 	dds_return_t rc;
-	
+    
 	/* ----------------------------------------------------- */
     /* Create participant                                    */
     /* ----------------------------------------------------- */
@@ -174,7 +199,7 @@ void *worker(void *arg)
         NULL,
         NULL
     );
-	
+    
 	response_topic = dds_create_topic
 	(
         participant,
@@ -183,7 +208,7 @@ void *worker(void *arg)
         NULL,
         NULL
     );
-	
+    
 	position_topic = dds_create_topic
 	(
         participant,
@@ -192,7 +217,7 @@ void *worker(void *arg)
         NULL,
         NULL
     );
-	
+    
 	input_topic = dds_create_topic
 	(
         participant,
@@ -229,14 +254,14 @@ void *worker(void *arg)
         NULL,
         NULL
     );
-	
+    
 	input_reader = dds_create_reader(
         participant,
         input_topic,
         NULL,
         NULL
     );
-	
+    
 	 /* ----------------------------------------------------- */
     /* Create writers                                         */
     /* ----------------------------------------------------- */
@@ -247,7 +272,7 @@ void *worker(void *arg)
         NULL,
         NULL
     );
-	
+    
 	position_writer = dds_create_writer(
         participant,
         position_topic,
@@ -280,13 +305,13 @@ void *worker(void *arg)
 	* the buffer array to a valid sample memory location. */
 	samples_join[0] = JoinRequest__alloc();
 	samples_input[0] = Input__alloc();
-	
+    
 	// Create a Join Response
 	JoinResponse response;
-	
+    
 	// Create a Position
 	Position position;
-	
+    
 	// Ground truth of who owns which cell; only touched by this thread
 	Grid grid;
 	grid_init(&grid);
@@ -303,9 +328,10 @@ void *worker(void *arg)
 	/* Poll until data has been read. */
 	while (1)
 	{
-		// Process a join request
+		// Process a join request (Slide 11, Figure 4a: Join Request, then Join
+		// Response carrying the new player's ID)
 		rc = dds_take(join_reader, samples_join, infos_join, MAX_SAMPLES, MAX_SAMPLES);
-		
+        
 		if (rc < 0)
 			DDS_FATAL("dds_take: %s\n", dds_strretcode(-rc));
 
@@ -314,6 +340,7 @@ void *worker(void *arg)
 		{
 			JoinRequest *join_req = (JoinRequest *) samples_join[0];
 			// Authenticate the client before admitting it - see security.h
+				// (a required security feature, Slide 14)
 			if (security_verify_client_token(join_req->arr_token))
 			{
 				printf("Join request received (authenticated)\n");
@@ -329,7 +356,7 @@ void *worker(void *arg)
 				printf("Join request rejected: authentication failed\n");
 			}
 		}
-		
+        
 		// If a new player ID has been assigned by the main thread
 		pthread_mutex_lock(&mutex);
 		int int_new_player_id_temp = int_new_player_id;
@@ -345,7 +372,7 @@ void *worker(void *arg)
 			// The player ID can be 0, ie invalid
 			response.int_player_id = int_new_player_id_temp;
 			response.int_nonce = int_new_player_nonce_temp;
-			
+            
 			rc = dds_write(response_writer, &response);
 			if (rc != DDS_RETCODE_OK)
 			{
@@ -355,7 +382,7 @@ void *worker(void *arg)
 			/* Polling sleep. */
 			dds_sleepfor (DDS_MSECS (20));
 		}
-		
+        
 		// Get the current time
 		uint64_t curr_time = dds_time();
 		// Get the time difference
@@ -363,8 +390,10 @@ void *worker(void *arg)
 		{
 			// Update the last time
 			last_time = curr_time;
-			
-			// Loop through the players list
+            
+			// Loop through the players list. Positions are only sent for active
+			// players (Slide 10), and every client receives them (Slide 11,
+			// Figure 4b)
 			for(int i = 0; i < MAX_PLAYERS; i++)
 			{
 				pthread_mutex_lock(&mutex);
@@ -456,10 +485,11 @@ void *worker(void *arg)
 			publish_game_state(state_writer, int_seconds_left, b_round_started,
 				b_game_over, int_winner_id);
 		}
-		
-		// Listen for input
+        
+		// Listen for input (Slide 11, Figure 4b: the client sends Input, the
+		// server checks collisions and updates all positions)
 		rc = dds_take(input_reader, samples_input, infos_input, MAX_SAMPLES, MAX_SAMPLES);
-		
+        
 		if (rc < 0)
 			DDS_FATAL("dds_take: %s\n", dds_strretcode(-rc));
 
@@ -488,8 +518,10 @@ void *worker(void *arg)
 					memcpy(&ch_input_dir, arr_plain + sizeof(int), sizeof(char));
 				}
 			}
-			
+            
 			// Compute the move and apply it if legal - see game_logic.h
+				// (a square may not leave the window or overlap another
+				// player's square, Slide 7)
 			pthread_mutex_lock(&mutex);
 			int int_new_x, int_new_y;
 			bool b_moved = game_try_move(arr_Players, MAX_PLAYERS,
@@ -508,6 +540,7 @@ void *worker(void *arg)
 	}
 }
 
+// Entry point of the application
 int main(void)
 {
 	// Seed rand(), so that the random numbers are different for each run
@@ -519,6 +552,8 @@ int main(void)
 		return 1;
 	}
 
+	// The main thread keeps the game state (join handling) while this worker
+	// thread does the DDS traffic (Slide 12)
 	pthread_t thread;
 
     if (pthread_create(&thread, NULL, worker, NULL) != 0)
@@ -526,7 +561,7 @@ int main(void)
         perror("pthread_create");
         return 1;
     }
-	
+    
 	printf("Waiting...\n");
 	while (1)
 	{
@@ -536,7 +571,7 @@ int main(void)
 		// }
 		//printf("============\n");
 		/* dds_sleepfor (DDS_SECS (0.5)); */
-					
+                    
 		// Yield the CPU, otherwise this loop spins at 100%
 		dds_sleepfor(DDS_MSECS(1));
 

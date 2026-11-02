@@ -1,5 +1,13 @@
-/* test_security.c
-Minimal, dependency-free unit tests for security.h / security.c.
+/*****************************************************************************
+\file test_security.c
+\author regine wong (w.shiyuregine@digipen.edu)
+\par Course: CSD3116
+\par Assignment: Week 1 Team Lab
+\date 11/02/2026 (MM/DD/YYYY)
+\brief Dependency-free unit tests for security.c; they document the current
+       stub behaviour until each TODO is implemented.
+*******************************************************************************/
+/* Minimal, dependency-free unit tests for security.h / security.c.
 No DDS, GLFW, or external test framework needed - just a C compiler:
 
     gcc test_security.c security.c -o test_security

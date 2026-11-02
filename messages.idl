@@ -1,4 +1,7 @@
 //idlc -l c messages.idl
+// Defines the DDS messages (Slide 7); idlc turns this file into messages.h
+// and messages.c (Slide 9). The join and input/position messages follow the
+// flow in Slide 11, Figures 4a and 4b
 
 struct JoinRequest
 {

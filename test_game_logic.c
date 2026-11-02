@@ -1,5 +1,13 @@
-/* test_game_logic.c
-Dependency-free unit tests for game_logic.h / game_logic.c:
+/*****************************************************************************
+\file test_game_logic.c
+\author regine wong (w.shiyuregine@digipen.edu)
+\par Course: CSD3116
+\par Assignment: Week 1 Team Lab
+\date 11/02/2026 (MM/DD/YYYY)
+\brief Dependency-free unit tests for game_logic.c: collision, free slot, spawn
+       and movement rules.
+*******************************************************************************/
+/* Dependency-free unit tests for game_logic.h / game_logic.c:
 detect_collision(), game_find_free_slot(), game_random_spawn() and
 game_try_move().
 
@@ -214,13 +222,13 @@ static void test_try_move_each_direction(void)
 	int int_x, int_y;
 
 	TEST_ASSERT(game_try_move(arr_players, MAX_PLAYERS, 1, 'u', &int_x, &int_y)
-		&& int_x == 400 && int_y == 299, "'u' should decrease y by STEP");
+		&& int_x == 400 && int_y == 300 - STEP, "'u' should decrease y by STEP");
 	TEST_ASSERT(game_try_move(arr_players, MAX_PLAYERS, 1, 'd', &int_x, &int_y)
-		&& int_x == 400 && int_y == 301, "'d' should increase y by STEP");
+		&& int_x == 400 && int_y == 300 + STEP, "'d' should increase y by STEP");
 	TEST_ASSERT(game_try_move(arr_players, MAX_PLAYERS, 1, 'l', &int_x, &int_y)
-		&& int_x == 399 && int_y == 300, "'l' should decrease x by STEP");
+		&& int_x == 400 - STEP && int_y == 300, "'l' should decrease x by STEP");
 	TEST_ASSERT(game_try_move(arr_players, MAX_PLAYERS, 1, 'r', &int_x, &int_y)
-		&& int_x == 401 && int_y == 300, "'r' should increase x by STEP");
+		&& int_x == 400 + STEP && int_y == 300, "'r' should increase x by STEP");
 }
 
 static void test_try_move_unrecognized_direction_is_noop(void)

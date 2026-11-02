@@ -1,5 +1,13 @@
-/* test_grid_logic.c
-Dependency-free unit tests for grid_logic.h / grid_logic.c:
+/*****************************************************************************
+\file test_grid_logic.c
+\author regine wong (w.shiyuregine@digipen.edu)
+\par Course: CSD3116
+\par Assignment: Week 1 Team Lab
+\date 11/02/2026 (MM/DD/YYYY)
+\brief Dependency-free unit tests for grid_logic.c: cell lookup, claiming, scoring,
+       winner selection and the round timer.
+*******************************************************************************/
+/* Dependency-free unit tests for grid_logic.h / grid_logic.c:
 grid_cell_at(), grid_set_owner(), grid_claim(), grid_count_owned(),
 grid_winner() and grid_seconds_left().
 
