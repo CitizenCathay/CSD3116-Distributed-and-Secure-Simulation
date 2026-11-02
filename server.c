@@ -1,4 +1,4 @@
-/* gcc -o server server.c security.c game_logic.c messages.c $(pkg-config --cflags --libs CycloneDDS) */
+/* gcc -o server server.c security.c game_logic.c grid_logic.c messages.c $(pkg-config --cflags --libs CycloneDDS) */
 
 /* Dr Khoo Teck Ping
 27 Aug 2026
@@ -23,11 +23,16 @@ watch out for break out of loop */
 #include "messages.h"
 #include "security.h"
 #include "game_logic.h"
+#include "grid_logic.h"
 
 // ### GLOBAL CONSTANTS ###
 /* An array of one message (aka sample in dds terms) will be used. */
 #define MAX_SAMPLES 1
 #define MAX_PLAYERS 5
+// The round starts once this many players have joined
+#define MIN_PLAYERS 2
+// Length of a round in seconds
+#define ROUND_SECS 60
 
 // ### GLOBAL VARIABLES ###
 int int_num_active_players = 0;
@@ -42,10 +47,79 @@ bool b_player_join = false;
 // 1~MAX_PLAYERS = Valid player IDs
 int int_new_player_id = -1;
 
+// Nonce of the join request being processed, and of the one the pending
+// response is for, so each response can be matched to the client that asked
+int int_join_nonce = 0;
+int int_new_player_nonce = 0;
+
 // Table to track clients
 // Init all members to 0
 static Player arr_Players[MAX_PLAYERS] = {0};
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Publishes that a cell changed owner (0 = unclaimed)
+static void publish_cell_claimed(dds_entity_t a_writer, int a_int_col,
+	int a_int_row, int a_int_owner_id)
+{
+	CellClaimed claim;
+	claim.int_cell_x = a_int_col;
+	claim.int_cell_y = a_int_row;
+	claim.int_owner_id = a_int_owner_id;
+
+	// Encrypt the payload before publishing - see security.h
+	// len_cipher stays 0 (plaintext fields above are used instead) if
+	// encryption is not available
+	int arr_plain[3] = { a_int_col, a_int_row, a_int_owner_id };
+	size_t cipher_len = 0;
+	if (security_encrypt((unsigned char *)arr_plain, sizeof(arr_plain),
+		claim.arr_cipher, &cipher_len) &&
+		cipher_len <= sizeof(claim.arr_cipher))
+	{
+		claim.len_cipher = (unsigned long)cipher_len;
+	}
+	else
+	{
+		claim.len_cipher = 0;
+	}
+
+	dds_return_t rc = dds_write(a_writer, &claim);
+	if (rc != DDS_RETCODE_OK)
+	{
+		DDS_FATAL("dds_write: %s\n", dds_strretcode(-rc));
+	}
+}
+
+// Publishes the round timer and, once over, the result
+static void publish_game_state(dds_entity_t a_writer, int a_int_seconds_left,
+	bool a_b_started, bool a_b_game_over, int a_int_winner_id)
+{
+	GameState state;
+	state.int_seconds_left = a_int_seconds_left;
+	state.b_started = a_b_started;
+	state.b_game_over = a_b_game_over;
+	state.int_winner_id = a_int_winner_id;
+
+	// Encrypt the payload before publishing - see security.h
+	int arr_plain[4] = { a_int_seconds_left, a_b_started, a_b_game_over,
+		a_int_winner_id };
+	size_t cipher_len = 0;
+	if (security_encrypt((unsigned char *)arr_plain, sizeof(arr_plain),
+		state.arr_cipher, &cipher_len) &&
+		cipher_len <= sizeof(state.arr_cipher))
+	{
+		state.len_cipher = (unsigned long)cipher_len;
+	}
+	else
+	{
+		state.len_cipher = 0;
+	}
+
+	dds_return_t rc = dds_write(a_writer, &state);
+	if (rc != DDS_RETCODE_OK)
+	{
+		DDS_FATAL("dds_write: %s\n", dds_strretcode(-rc));
+	}
+}
 
 void *worker(void *arg)
 {
@@ -54,9 +128,13 @@ void *worker(void *arg)
 	dds_entity_t response_topic;
 	dds_entity_t position_topic;
 	dds_entity_t input_topic;
+	dds_entity_t cell_topic;
+	dds_entity_t state_topic;
 	dds_entity_t join_reader;
 	dds_entity_t response_writer;
 	dds_entity_t position_writer;
+	dds_entity_t cell_writer;
+	dds_entity_t state_writer;
 	dds_entity_t input_reader;
 		
 	//Pointer to unknown type
@@ -123,6 +201,24 @@ void *worker(void *arg)
         NULL,
         NULL
     );
+
+	cell_topic = dds_create_topic
+	(
+        participant,
+        &CellClaimed_desc,
+        "CellClaimed",
+        NULL,
+        NULL
+    );
+
+	state_topic = dds_create_topic
+	(
+        participant,
+        &GameState_desc,
+        "GameState",
+        NULL,
+        NULL
+    );
 	/* ----------------------------------------------------- */
     /* Create readers                                         */
     /* ----------------------------------------------------- */
@@ -158,7 +254,28 @@ void *worker(void *arg)
         NULL,
         NULL
     );
-	
+
+	// CellClaimed is keyed per cell: transient-local + keep-last-1 lets a
+	// client that joins mid-round receive the current owner of every cell
+	dds_qos_t *qos_cell = dds_create_qos();
+	dds_qset_durability(qos_cell, DDS_DURABILITY_TRANSIENT_LOCAL);
+	dds_qset_reliability(qos_cell, DDS_RELIABILITY_RELIABLE, DDS_SECS(1));
+	dds_qset_history(qos_cell, DDS_HISTORY_KEEP_LAST, 1);
+	cell_writer = dds_create_writer(
+        participant,
+        cell_topic,
+        qos_cell,
+        NULL
+    );
+	dds_delete_qos(qos_cell);
+
+	state_writer = dds_create_writer(
+        participant,
+        state_topic,
+        NULL,
+        NULL
+    );
+
 	/* Initialize sample buffer, by pointing the void pointer within
 	* the buffer array to a valid sample memory location. */
 	samples_join[0] = JoinRequest__alloc();
@@ -170,8 +287,19 @@ void *worker(void *arg)
 	// Create a Position
 	Position position;
 	
+	// Ground truth of who owns which cell; only touched by this thread
+	Grid grid;
+	grid_init(&grid);
+
+	// Round state: waiting for players -> running -> over
+	bool b_round_started = false;
+	bool b_game_over = false;
+	int int_winner_id = 0;
+	dds_time_t round_start_time = 0;
+	dds_time_t last_state_time = 0;
+
 	// Record the time now
-	uint64_t last_time = dds_time();	
+	uint64_t last_time = dds_time();
 	/* Poll until data has been read. */
 	while (1)
 	{
@@ -193,6 +321,7 @@ void *worker(void *arg)
 				// number of active players reached
 				pthread_mutex_lock(&mutex);
 				b_player_join = true;
+				int_join_nonce = join_req->int_nonce;
 				pthread_mutex_unlock(&mutex);
 			}
 			else
@@ -204,6 +333,7 @@ void *worker(void *arg)
 		// If a new player ID has been assigned by the main thread
 		pthread_mutex_lock(&mutex);
 		int int_new_player_id_temp = int_new_player_id;
+		int int_new_player_nonce_temp = int_new_player_nonce;
 		/* printf("int_new_player_id_temp=%d\n", int_new_player_id_temp); */
 		pthread_mutex_unlock(&mutex);
 		if (int_new_player_id_temp != -1)
@@ -214,6 +344,7 @@ void *worker(void *arg)
 			pthread_mutex_unlock(&mutex);
 			// The player ID can be 0, ie invalid
 			response.int_player_id = int_new_player_id_temp;
+			response.int_nonce = int_new_player_nonce_temp;
 			
 			rc = dds_write(response_writer, &response);
 			if (rc != DDS_RETCODE_OK)
@@ -265,12 +396,65 @@ void *worker(void *arg)
 					{
 						DDS_FATAL("dds_write: %s\n", dds_strretcode(-rc));
 					}
-					printf("Position sent\n");
+					// printf("Position sent\n");
+
+					// Claim the cell under this player while the round runs,
+					// and tell the clients if it changed hands
+					if (b_round_started && !b_game_over)
+					{
+						int int_col, int_row;
+						if (grid_claim(&grid, i+1, arr_Players[i].x,
+							arr_Players[i].y, &int_col, &int_row))
+						{
+							publish_cell_claimed(cell_writer, int_col, int_row, i+1);
+						}
+					}
 					/* Polling sleep. */
 					dds_sleepfor (DDS_MSECS (20));
 				}
 				pthread_mutex_unlock(&mutex);
 			}
+		}
+
+		// Yield the CPU, otherwise this loop spins at 100%
+		dds_sleepfor(DDS_MSECS(1));
+
+		// Start the round once enough players have joined
+		pthread_mutex_lock(&mutex);
+		int int_num_active_temp = int_num_active_players;
+		pthread_mutex_unlock(&mutex);
+		if (!b_round_started && int_num_active_temp >= MIN_PLAYERS)
+		{
+			b_round_started = true;
+			round_start_time = dds_time();
+			printf("Round started\n");
+		}
+
+		// End the round when the timer hits 0
+		int int_seconds_left = ROUND_SECS;
+		if (b_round_started)
+		{
+			int_seconds_left = grid_seconds_left(round_start_time, dds_time(),
+				ROUND_SECS);
+		}
+		bool b_state_due = false;
+		if (b_round_started && !b_game_over && int_seconds_left == 0)
+		{
+			b_game_over = true;
+			int_winner_id = grid_winner(&grid, MAX_PLAYERS);
+			printf("Round over, winner = %d\n", int_winner_id);
+			// Do not wait for the next tick to announce the result
+			b_state_due = true;
+		}
+
+		// Publish the timer about once a second, and keep repeating the
+		// result after the round ends so late clients still receive it
+		dds_time_t state_now = dds_time();
+		if (b_state_due || state_now - last_state_time > DDS_SECS(1))
+		{
+			last_state_time = state_now;
+			publish_game_state(state_writer, int_seconds_left, b_round_started,
+				b_game_over, int_winner_id);
 		}
 		
 		// Listen for input
@@ -282,7 +466,7 @@ void *worker(void *arg)
 		// Check if we read some data and it is valid.
 		if ((rc > 0) && (infos_input[0].valid_data))
 		{
-			printf("Input received\n");
+			// printf("Input received\n");
 			Input *input = (Input *) samples_input[0];
 			// Get the input player ID
 			int int_input_player_id = input->int_player_id;
@@ -310,7 +494,8 @@ void *worker(void *arg)
 			int int_new_x, int_new_y;
 			bool b_moved = game_try_move(arr_Players, MAX_PLAYERS,
 				int_input_player_id, ch_input_dir, &int_new_x, &int_new_y);
-			if (b_moved)
+			// Players are frozen once the round is over
+			if (b_moved && !b_game_over)
 			{
 				// Index is player ID minus 1
 				arr_Players[int_input_player_id-1].x = int_new_x;
@@ -352,6 +537,9 @@ int main(void)
 		//printf("============\n");
 		/* dds_sleepfor (DDS_SECS (0.5)); */
 					
+		// Yield the CPU, otherwise this loop spins at 100%
+		dds_sleepfor(DDS_MSECS(1));
+
 		// If a join request has been received
 		pthread_mutex_lock(&mutex);
 		bool b_player_join_temp = b_player_join;
@@ -363,6 +551,7 @@ int main(void)
 			// player - see game_logic.h
 			pthread_mutex_lock(&mutex);
 			b_player_join = false;
+			int_new_player_nonce = int_join_nonce;
 			int int_slot = game_find_free_slot(arr_Players, MAX_PLAYERS);
 			if (int_slot == -1)
 			{
