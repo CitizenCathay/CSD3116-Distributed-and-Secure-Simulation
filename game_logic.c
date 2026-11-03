@@ -26,13 +26,14 @@ bool detect_collision(const Player a_arr_players[], int a_int_arr_len,
 		// If a player other than the player itself is active
 		if (i != a_int_id - 1 && a_arr_players[i].b_active == true)
 		{
-			// If they overlap horizontally
-			if (a_int_x <= a_arr_players[i].x + SQ_WIDTH &&
-				a_arr_players[i].x <= a_int_x + SQ_WIDTH)
+			// If they overlap horizontally (strict: merely touching
+			// edges is not a collision, so adjacent grid cells are legal)
+			if (a_int_x < a_arr_players[i].x + SQ_WIDTH &&
+				a_arr_players[i].x < a_int_x + SQ_WIDTH)
 			{
 				// If they overlap vertically
-				if (a_int_y <= a_arr_players[i].y + SQ_WIDTH &&
-					a_arr_players[i].y <= a_int_y + SQ_WIDTH)
+				if (a_int_y < a_arr_players[i].y + SQ_WIDTH &&
+					a_arr_players[i].y < a_int_y + SQ_WIDTH)
 				{
 					b_res = true;
 					break;
@@ -61,8 +62,12 @@ void game_random_spawn(const Player a_arr_players[], int a_int_arr_len,
 	int int_rand_y = 0;
 	while (1)
 	{
-		int_rand_x = rand() % (WIDTH - SQ_WIDTH + 1);
-		int_rand_y = rand() % (HEIGHT - SQ_WIDTH + 1);
+		// Snap to the grid: a multiple of SQ_WIDTH in x, and in y within
+		// the playable strip between the HUD margins (WIDTH and
+		// PLAY_HEIGHT are both multiples of SQ_WIDTH, so every value
+		// below is already grid-aligned)
+		int_rand_x = (rand() % (WIDTH / SQ_WIDTH)) * SQ_WIDTH;
+		int_rand_y = PLAY_TOP + (rand() % (PLAY_HEIGHT / SQ_WIDTH)) * SQ_WIDTH;
 		if (!detect_collision(a_arr_players, a_int_arr_len, a_int_id, int_rand_x, int_rand_y))
 			break;
 	}
@@ -100,10 +105,11 @@ bool game_try_move(const Player a_arr_players[], int a_int_arr_len,
 	*out_x = a_arr_players[a_int_id - 1].x;
 	*out_y = a_arr_players[a_int_id - 1].y;
 
-	// Check collision with window
+	// Check collision with the window edges and the HUD margins - the
+	// playable strip is [0, WIDTH-SQ_WIDTH] x [PLAY_TOP, PLAY_TOP+PLAY_HEIGHT-SQ_WIDTH]
 	if (int_x < 0 || int_x > WIDTH - SQ_WIDTH)
 		return false;
-	if (int_y < 0 || int_y > HEIGHT - SQ_WIDTH)
+	if (int_y < PLAY_TOP || int_y > PLAY_TOP + PLAY_HEIGHT - SQ_WIDTH)
 		return false;
 
 	// Check collision with other players

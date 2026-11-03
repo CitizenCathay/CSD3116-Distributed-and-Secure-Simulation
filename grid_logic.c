@@ -21,9 +21,11 @@ void grid_init(Grid *a_grid)
 
 void grid_cell_at(int a_int_x, int a_int_y, int *out_col, int *out_row)
 {
-	// Use the centre of the square, so exactly one cell is claimed
+	// Use the centre of the square, so exactly one cell is claimed. Rows
+	// are measured from the top of the playable strip (PLAY_TOP), not
+	// the window edge, since the HUD occupies the margin above it
 	int int_col = (a_int_x + SQ_WIDTH / 2) / SQ_WIDTH;
-	int int_row = (a_int_y + SQ_WIDTH / 2) / SQ_WIDTH;
+	int int_row = (a_int_y - PLAY_TOP + SQ_WIDTH / 2) / SQ_WIDTH;
 
 	if (int_col < 0)
 		int_col = 0;

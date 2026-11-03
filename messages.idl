@@ -24,7 +24,11 @@ struct JoinResponse
 
 struct Input
 {
-	long int_player_id;
+	// Keyed so each client's Input has its own instance/history slot in
+	// the server's reader - otherwise all clients' writes would compete
+	// for a single unkeyed instance and could overwrite one another
+	// before the server reads them
+	@key long int_player_id;
     char ch_direction;
 	// Encrypted copy of this message's payload - see security.h
 	// len_cipher == 0 means encryption is not in use (fall back to the
@@ -72,7 +76,12 @@ struct GameState
 
 struct Position
 {
-	long int_player_id;
+	// Keyed so each player has their own instance/history slot in every
+	// client's reader - otherwise all players' positions would share a
+	// single unkeyed instance, and one player's update could silently
+	// overwrite another's before a client reads it (seen as another
+	// player's square lagging several tiles behind their claimed cells)
+	@key long int_player_id;
 	long int_x;
 	long int_y;
 	// Encrypted copy of this message's payload - see security.h

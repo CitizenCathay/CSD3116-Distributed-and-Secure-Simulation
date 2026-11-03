@@ -48,25 +48,27 @@ static void test_cell_at_uses_square_centre(void)
 {
 	int int_col, int_row;
 
-	// Square at the origin: centre is at (25,25), inside cell (0,0)
-	grid_cell_at(0, 0, &int_col, &int_row);
-	TEST_ASSERT(int_col == 0 && int_row == 0, "origin square is in cell 0,0");
+	// Square at the top-left of the PLAY area (x=0, y=PLAY_TOP): centre
+	// is at (25, PLAY_TOP+25), inside cell (0,0). Rows are measured from
+	// PLAY_TOP, since the HUD margin above it is never part of the grid
+	grid_cell_at(0, PLAY_TOP, &int_col, &int_row);
+	TEST_ASSERT(int_col == 0 && int_row == 0, "top-left play square is in cell 0,0");
 
 	// Centre just short of the next cell boundary
-	grid_cell_at(24, 24, &int_col, &int_row);
-	TEST_ASSERT(int_col == 0 && int_row == 0, "centre at 49 is still cell 0,0");
+	grid_cell_at(24, PLAY_TOP + 24, &int_col, &int_row);
+	TEST_ASSERT(int_col == 0 && int_row == 0, "centre at +49 is still cell 0,0");
 
 	// Centre exactly on the boundary belongs to the next cell
-	grid_cell_at(25, 25, &int_col, &int_row);
-	TEST_ASSERT(int_col == 1 && int_row == 1, "centre at 50 is cell 1,1");
+	grid_cell_at(25, PLAY_TOP + 25, &int_col, &int_row);
+	TEST_ASSERT(int_col == 1 && int_row == 1, "centre at +50 is cell 1,1");
 }
 
 static void test_cell_at_bottom_right_corner(void)
 {
 	int int_col, int_row;
-	grid_cell_at(WIDTH - SQ_WIDTH, HEIGHT - SQ_WIDTH, &int_col, &int_row);
+	grid_cell_at(WIDTH - SQ_WIDTH, PLAY_TOP + PLAY_HEIGHT - SQ_WIDTH, &int_col, &int_row);
 	TEST_ASSERT(int_col == GRID_COLS - 1, "rightmost square is in the last column");
-	TEST_ASSERT(int_row == GRID_ROWS - 1, "bottom square is in the last row");
+	TEST_ASSERT(int_row == GRID_ROWS - 1, "bottommost play square is in the last row");
 }
 
 static void test_cell_at_clamps_outside_window(void)
@@ -106,12 +108,12 @@ static void test_claim_takes_cell_and_reports_cell(void)
 	int int_col, int_row;
 	grid_init(&grid);
 
-	bool b_changed = grid_claim(&grid, 1, 100, 100, &int_col, &int_row);
+	bool b_changed = grid_claim(&grid, 1, 100, PLAY_TOP + 100, &int_col, &int_row);
 	TEST_ASSERT(b_changed == true, "first claim changes the cell");
 	TEST_ASSERT(int_col == 2 && int_row == 2, "claimed cell is reported");
 	TEST_ASSERT(grid.arr_owner[2 * GRID_COLS + 2] == 1, "player 1 owns the cell");
 
-	b_changed = grid_claim(&grid, 1, 101, 101, &int_col, &int_row);
+	b_changed = grid_claim(&grid, 1, 101, PLAY_TOP + 101, &int_col, &int_row);
 	TEST_ASSERT(b_changed == false, "re-claiming your own cell is not a change");
 	TEST_ASSERT(int_col == 2 && int_row == 2, "cell is still reported when unchanged");
 }
@@ -121,8 +123,8 @@ static void test_claim_overwrites_other_player(void)
 	Grid grid;
 	int int_col, int_row;
 	grid_init(&grid);
-	grid_claim(&grid, 1, 100, 100, &int_col, &int_row);
-	bool b_changed = grid_claim(&grid, 2, 100, 100, &int_col, &int_row);
+	grid_claim(&grid, 1, 100, PLAY_TOP + 100, &int_col, &int_row);
+	bool b_changed = grid_claim(&grid, 2, 100, PLAY_TOP + 100, &int_col, &int_row);
 	TEST_ASSERT(b_changed == true, "stepping on another's cell takes it");
 	TEST_ASSERT(grid_count_owned(&grid, 1) == 0, "previous owner loses the cell");
 	TEST_ASSERT(grid_count_owned(&grid, 2) == 1, "new owner gains the cell");

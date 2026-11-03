@@ -24,8 +24,21 @@ include this instead of each keeping their own copy. */
 #define HEIGHT   600
 #define SQ_WIDTH 50
 
-// How many pixels a player moves per accepted input
-#define STEP     4
+// How many pixels a player moves per accepted input - a full cell, so
+// positions (and the floor cell they claim) always stay grid-snapped
+#define STEP     SQ_WIDTH
+
+// Strip reserved for the HUD at the top and bottom of the window, so the
+// grid and players never render underneath draw_hud()'s overlay bars.
+// Both are exactly one cell tall, which keeps the playable area (below)
+// a whole number of rows
+#define HUD_MARGIN_TOP    SQ_WIDTH
+#define HUD_MARGIN_BOTTOM SQ_WIDTH
+
+// The vertical span players and the grid may actually use - y stays
+// within [PLAY_TOP, PLAY_TOP + PLAY_HEIGHT - SQ_WIDTH]
+#define PLAY_TOP    HUD_MARGIN_TOP
+#define PLAY_HEIGHT (HEIGHT - HUD_MARGIN_TOP - HUD_MARGIN_BOTTOM)
 
 // One row of the game state array: Active, X, Y (Slide 10, Figure 3).
 // The player ID is the array index plus 1.
@@ -41,7 +54,8 @@ typedef struct
 // would overlap any OTHER active player in a_arr_players[0..a_int_arr_len).
 // a_int_id is the player ID (array index + 1) of the square being
 // checked, so that player's own current entry is excluded from the
-// check. Touching edges count as a collision (uses <=, not <).
+// check. Merely touching edges is NOT a collision (uses <, not <=), so
+// two players may legally occupy adjacent grid cells.
 bool detect_collision(const Player a_arr_players[], int a_int_arr_len,
 	int a_int_id, int a_int_x, int a_int_y);
 

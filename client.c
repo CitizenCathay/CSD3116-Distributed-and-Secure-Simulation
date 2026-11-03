@@ -46,6 +46,11 @@ Slide 12 threading, Slide 14 tasks. */
 // The baseline supports at most five clients (Slide 7)
 #define MAX_PLAYERS 5
 
+// How often a held arrow key sends another Input while STEP moves a full
+// grid cell at a time - too fast and the square blurs across several
+// tiles per second instead of stepping cell by cell
+#define MOVE_REPEAT_MSECS 150
+
 // One RGB colour per player, indexed by player ID minus 1
 static const float arr_colors[MAX_PLAYERS][3] =
 {
@@ -174,13 +179,13 @@ static void draw_cells(const Grid *a_grid, float a_f_dt)
 	glBegin(GL_LINES);
 	for (int int_col = 0; int_col <= GRID_COLS; int_col++)
 	{
-		glVertex2f(int_col * SQ_WIDTH, 0);
-		glVertex2f(int_col * SQ_WIDTH, HEIGHT);
+		glVertex2f(int_col * SQ_WIDTH, PLAY_TOP);
+		glVertex2f(int_col * SQ_WIDTH, PLAY_TOP + PLAY_HEIGHT);
 	}
 	for (int int_row = 0; int_row <= GRID_ROWS; int_row++)
 	{
-		glVertex2f(0, int_row * SQ_WIDTH);
-		glVertex2f(WIDTH, int_row * SQ_WIDTH);
+		glVertex2f(0, PLAY_TOP + int_row * SQ_WIDTH);
+		glVertex2f(WIDTH, PLAY_TOP + int_row * SQ_WIDTH);
 	}
 	glEnd();
 
@@ -217,7 +222,7 @@ static void draw_cells(const Grid *a_grid, float a_f_dt)
 			glColor4f(0.8f * arr_c[0] + f_flash * (1.0f - 0.8f * arr_c[0]),
 				0.8f * arr_c[1] + f_flash * (1.0f - 0.8f * arr_c[1]),
 				0.8f * arr_c[2] + f_flash * (1.0f - 0.8f * arr_c[2]), 1.0f);
-			draw_rect(int_col * SQ_WIDTH + f_inset, int_row * SQ_WIDTH + f_inset,
+			draw_rect(int_col * SQ_WIDTH + f_inset, PLAY_TOP + int_row * SQ_WIDTH + f_inset,
 				SQ_WIDTH - 2.0f * f_inset, SQ_WIDTH - 2.0f * f_inset);
 		}
 	}
@@ -268,8 +273,10 @@ static void draw_players(const Player a_arr_players[], int a_int_own_id,
 
 		if (b_own)
 		{
-			// Above the square, or below it when it is against the top edge
-			float f_marker_y = (f_y > 16.0f) ? f_y - 16.0f : f_y + SQ_WIDTH + 4.0f;
+			// Above the square, or below it when there is not enough room
+			// above to clear the top HUD margin (PLAY_TOP)
+			bool b_room_above = (f_y - PLAY_TOP) > 16.0f;
+			float f_marker_y = b_room_above ? f_y - 16.0f : f_y + SQ_WIDTH + 4.0f;
 			draw_label_centered(f_x + SQ_WIDTH / 2.0f, f_marker_y, 1.5f,
 				arr_white, 1.0f, "YOU");
 		}
@@ -285,9 +292,10 @@ static void draw_hud(const Grid *a_grid, const Player a_arr_players[],
 	bool b_low = a_b_started && a_int_secs <= 10;
 	float f_blink = 0.65f + 0.35f * sinf((float)a_d_time * 8.0f);
 
-	// Top strip
+	// Top strip - exactly HUD_MARGIN_TOP tall (solid bar + the thin time
+	// bar below it), so it can never bleed into the playable grid
 	glColor4f(0.0f, 0.0f, 0.0f, 0.55f);
-	draw_rect(0, 0, WIDTH, 44);
+	draw_rect(0, 0, WIDTH, HUD_MARGIN_TOP - 4);
 
 	if (a_int_own_id >= 1 && a_int_own_id <= MAX_PLAYERS)
 	{
@@ -309,34 +317,35 @@ static void draw_hud(const Grid *a_grid, const Player a_arr_players[],
 	// Time bar: drains as the round runs out
 	float f_frac = a_b_started ? (float)a_int_secs / ROUND_SECS : 1.0f;
 	glColor4f(1.0f, 1.0f, 1.0f, 0.1f);
-	draw_rect(0, 44, WIDTH, 4);
+	draw_rect(0, HUD_MARGIN_TOP - 4, WIDTH, 4);
 	if (b_low)
 		glColor4f(arr_alarm[0], arr_alarm[1], arr_alarm[2], f_blink);
 	else
 		glColor4f(1.0f, 1.0f, 1.0f, 0.8f);
-	draw_rect(0, 44, WIDTH * f_frac, 4);
+	draw_rect(0, HUD_MARGIN_TOP - 4, WIDTH * f_frac, 4);
 
 	// Count each player's cells once, for both the bar and the labels
 	int arr_counts[MAX_PLAYERS];
 	for (int i = 0; i < MAX_PLAYERS; i++)
 		arr_counts[i] = grid_count_owned(a_grid, i + 1);
 
-	// Bottom strip
+	// Bottom strip - exactly HUD_MARGIN_BOTTOM tall, for the same reason
+	// as the top strip above
 	glColor4f(0.0f, 0.0f, 0.0f, 0.55f);
-	draw_rect(0, HEIGHT - 56, WIDTH, 56);
+	draw_rect(0, HEIGHT - HUD_MARGIN_BOTTOM, WIDTH, HUD_MARGIN_BOTTOM);
 
 	// Territory bar: each player's share of the whole floor
 	float f_bar_x = 10.0f;
 	float f_bar_w = WIDTH - 20.0f;
-	float f_bar_y = HEIGHT - 50.0f;
+	float f_bar_y = HEIGHT - HUD_MARGIN_BOTTOM + 4.0f;
 	glColor4f(1.0f, 1.0f, 1.0f, 0.1f);
-	draw_rect(f_bar_x, f_bar_y, f_bar_w, 12);
+	draw_rect(f_bar_x, f_bar_y, f_bar_w, 10);
 	float f_cursor = f_bar_x;
 	for (int i = 0; i < MAX_PLAYERS; i++)
 	{
 		float f_seg = f_bar_w * arr_counts[i] / (GRID_COLS * GRID_ROWS);
 		glColor3fv(arr_colors[i]);
-		draw_rect(f_cursor, f_bar_y, f_seg, 12);
+		draw_rect(f_cursor, f_bar_y, f_seg, 10);
 		f_cursor += f_seg;
 	}
 
@@ -348,11 +357,11 @@ static void draw_hud(const Grid *a_grid, const Player a_arr_players[],
 			continue;
 
 		float f_x = 10.0f + int_slot * 150.0f;
-		float f_y = HEIGHT - 30.0f;
+		float f_y = HEIGHT - HUD_MARGIN_BOTTOM + 22.0f;
 		glColor3fv(arr_colors[i]);
-		draw_rect(f_x, f_y, 14, 14);
+		draw_rect(f_x, f_y, 12, 12);
 		snprintf(str_text, sizeof(str_text), "P%d  %d", i + 1, arr_counts[i]);
-		draw_label(f_x + 22.0f, f_y + 1.0f, 2.0f, arr_white, 1.0f, str_text);
+		draw_label(f_x + 18.0f, f_y, 1.7f, arr_white, 1.0f, str_text);
 		int_slot++;
 	}
 }
@@ -542,12 +551,18 @@ void *worker(void *arg)
         NULL
     );
     
+	// Must match the server's QoS for Position: reliable, so a move is
+	// never silently dropped and left trailing behind the (already
+	// reliable) CellClaimed for the same move
+	dds_qos_t *qos_position = dds_create_qos();
+	dds_qset_reliability(qos_position, DDS_RELIABILITY_RELIABLE, DDS_SECS(1));
 	position_reader = dds_create_reader(
         participant,
         position_topic,
-        NULL,
+        qos_position,
         NULL
     );
+	dds_delete_qos(qos_position);
 
 	// Must match the server's QoS for CellClaimed, so that the history of
 	// claimed cells is delivered to a client that joins mid-round
@@ -696,9 +711,9 @@ void *worker(void *arg)
 					DDS_FATAL("dds_write: %s\n", dds_strretcode(-rc));
 				}
 				// printf("Input sent\n");
-				// Need to slow down how often input gets sent, otherwise, 
-				//the player will move to the window limits immediately
-				dds_sleepfor(DDS_MSECS(10));
+				// Throttle to MOVE_REPEAT_MSECS, so holding a key steps one
+				// grid cell at a time instead of blurring across several
+				dds_sleepfor(DDS_MSECS(MOVE_REPEAT_MSECS));
 			}
 		}
 
@@ -785,15 +800,16 @@ void *worker(void *arg)
 			DDS_FATAL("dds_take: %s\n", dds_strretcode(-rc));
 
 		// Listen for position: the server is the only source of truth, so the
-		// local player array is only updated from these messages (Slide 10)
-		rc = dds_take(position_reader, samples_position, infos_position, MAX_SAMPLES, MAX_SAMPLES);
-        
-		if (rc < 0)
-			DDS_FATAL("dds_take: %s\n", dds_strretcode(-rc));
-
-		// Check if we read some data and it is valid.
-		if ((rc > 0) && (infos_position[0].valid_data))
+		// local player array is only updated from these messages (Slide 10).
+		// Drain them all, since several players' positions can be pending at
+		// once (one per active player, published together each server tick)
+		// - leaving any queued risks rendering a stale position after the
+		// matching CellClaimed (already fully drained above) has landed
+		while ((rc = dds_take(position_reader, samples_position, infos_position, MAX_SAMPLES, MAX_SAMPLES)) > 0)
 		{
+			if (!infos_position[0].valid_data)
+				continue;
+
 			// printf("Position received\n");
 			Position *position = (Position *) samples_position[0];
 			// Get the player ID
@@ -825,6 +841,8 @@ void *worker(void *arg)
 			arr_Players[int_position_player_id-1].y = int_position_y;
 			pthread_mutex_unlock(&mutex);
 		}
+		if (rc < 0)
+			DDS_FATAL("dds_take: %s\n", dds_strretcode(-rc));
 	}
 }
 

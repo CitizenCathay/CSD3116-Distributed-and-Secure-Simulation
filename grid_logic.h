@@ -20,9 +20,11 @@ messages. */
 #include <stdbool.h>
 #include "game_logic.h"
 
-// Must match the cell range assumed in messages.idl's CellClaimed
+// Must match the cell range assumed in messages.idl's CellClaimed.
+// Rows only span the playable strip (PLAY_HEIGHT), not the whole window,
+// since the HUD margins at the top/bottom are never part of the grid
 #define GRID_COLS (WIDTH / SQ_WIDTH)
-#define GRID_ROWS (HEIGHT / SQ_WIDTH)
+#define GRID_ROWS (PLAY_HEIGHT / SQ_WIDTH)
 
 // Owner value of a cell nobody has claimed (player IDs start at 1)
 #define GRID_UNCLAIMED 0

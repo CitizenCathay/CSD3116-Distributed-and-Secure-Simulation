@@ -47,6 +47,9 @@ watch out for break out of loop */
 #define MAX_PLAYERS 5
 // The round starts once this many players have joined
 #define MIN_PLAYERS 2
+// How long the result stays on screen before a new round starts
+// automatically - no need to restart the server to play again
+#define INTERMISSION_SECS 5
 
 // ### GLOBAL VARIABLES ###
 int int_num_active_players = 0;
@@ -273,12 +276,17 @@ void *worker(void *arg)
         NULL
     );
     
+	// Reliable, so a Position update is never silently dropped and left
+	// trailing behind the (already-reliable) CellClaimed for the same move
+	dds_qos_t *qos_position = dds_create_qos();
+	dds_qset_reliability(qos_position, DDS_RELIABILITY_RELIABLE, DDS_SECS(1));
 	position_writer = dds_create_writer(
         participant,
         position_topic,
-        NULL,
+        qos_position,
         NULL
     );
+	dds_delete_qos(qos_position);
 
 	// CellClaimed is keyed per cell: transient-local + keep-last-1 lets a
 	// client that joins mid-round receive the current owner of every cell
@@ -316,11 +324,13 @@ void *worker(void *arg)
 	Grid grid;
 	grid_init(&grid);
 
-	// Round state: waiting for players -> running -> over
+	// Round state: waiting for players -> running -> over -> (after
+	// INTERMISSION_SECS) waiting for players again
 	bool b_round_started = false;
 	bool b_game_over = false;
 	int int_winner_id = 0;
 	dds_time_t round_start_time = 0;
+	dds_time_t game_over_time = 0;
 	dds_time_t last_state_time = 0;
 
 	// Record the time now
@@ -470,9 +480,54 @@ void *worker(void *arg)
 		if (b_round_started && !b_game_over && int_seconds_left == 0)
 		{
 			b_game_over = true;
+			game_over_time = dds_time();
 			int_winner_id = grid_winner(&grid, MAX_PLAYERS);
 			printf("Round over, winner = %d\n", int_winner_id);
 			// Do not wait for the next tick to announce the result
+			b_state_due = true;
+		}
+
+		// Automatically start a new round a few seconds after the result is
+		// shown, instead of staying frozen until the server is restarted.
+		// The usual "enough players have joined" check above then re-starts
+		// the timer on the next iteration
+		if (b_game_over && dds_time() - game_over_time > DDS_SECS(INTERMISSION_SECS))
+		{
+			// Tell every client (and the transient-local cache CellClaimed
+			// uses for late joiners) that any claimed cell is unclaimed
+			// again - clearing just our own grid here would leave every
+			// client still showing the old colours, since they only ever
+			// learn about the grid through CellClaimed messages
+			for (int int_row = 0; int_row < GRID_ROWS; int_row++)
+			{
+				for (int int_col = 0; int_col < GRID_COLS; int_col++)
+				{
+					if (grid_set_owner(&grid, int_col, int_row, GRID_UNCLAIMED))
+						publish_cell_claimed(cell_writer, int_col, int_row, GRID_UNCLAIMED);
+				}
+			}
+
+			b_round_started = false;
+			b_game_over = false;
+			int_winner_id = 0;
+			int_seconds_left = ROUND_SECS;
+
+			// Give every active player a fresh, collision-free spawn
+			pthread_mutex_lock(&mutex);
+			for (int i = 0; i < MAX_PLAYERS; i++)
+			{
+				if (arr_Players[i].b_active)
+				{
+					int int_rand_x, int_rand_y;
+					game_random_spawn(arr_Players, MAX_PLAYERS, i + 1,
+						&int_rand_x, &int_rand_y);
+					arr_Players[i].x = int_rand_x;
+					arr_Players[i].y = int_rand_y;
+				}
+			}
+			pthread_mutex_unlock(&mutex);
+
+			printf("Starting a new round\n");
 			b_state_due = true;
 		}
 
@@ -487,15 +542,15 @@ void *worker(void *arg)
 		}
         
 		// Listen for input (Slide 11, Figure 4b: the client sends Input, the
-		// server checks collisions and updates all positions)
-		rc = dds_take(input_reader, samples_input, infos_input, MAX_SAMPLES, MAX_SAMPLES);
-        
-		if (rc < 0)
-			DDS_FATAL("dds_take: %s\n", dds_strretcode(-rc));
-
-		// Check if we read some data and it is valid.
-		if ((rc > 0) && (infos_input[0].valid_data))
+		// server checks collisions and updates all positions). Drain them
+		// all, since several clients' inputs can be pending at once - each
+		// is now its own keyed instance (messages.idl), but a single take
+		// per iteration could still let a backlog build up under load
+		while ((rc = dds_take(input_reader, samples_input, infos_input, MAX_SAMPLES, MAX_SAMPLES)) > 0)
 		{
+			if (!infos_input[0].valid_data)
+				continue;
+
 			// printf("Input received\n");
 			Input *input = (Input *) samples_input[0];
 			// Get the input player ID
@@ -537,6 +592,8 @@ void *worker(void *arg)
 			/* printf("input->int_player_id = %d\n", input->int_player_id);
 			printf("input->dir = %c\n", input->ch_direction); */
 		}
+		if (rc < 0)
+			DDS_FATAL("dds_take: %s\n", dds_strretcode(-rc));
 	}
 }
 
