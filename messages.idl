@@ -20,6 +20,15 @@ struct JoinResponse
     long int_player_id;
 	// Copied from the JoinRequest this is the answer to
 	long int_nonce;
+	// Encrypted copy of this message's payload - see security.h. The
+	// server already authenticates the client via JoinRequest.arr_token;
+	// this lets the client authenticate the response in return, so it
+	// does not trust a player ID that did not come from a holder of the
+	// shared key. len_cipher == 0 means encryption is not in use (fall
+	// back to the plaintext fields above); arr_cipher size must match
+	// SECURITY_CIPHERTEXT_LEN in security.h
+	octet arr_cipher[64];
+	unsigned long len_cipher;
 };
 
 struct Input

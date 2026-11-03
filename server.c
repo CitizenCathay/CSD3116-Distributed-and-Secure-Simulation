@@ -444,7 +444,27 @@ void *worker(void *arg)
 			// The player ID can be 0, ie invalid
 			response.int_player_id = int_new_player_id_temp;
 			response.int_nonce = int_new_player_nonce_temp;
-            
+
+			// Encrypt the payload before publishing - see security.h. Lets
+			// the client verify this response really came from a holder
+			// of the shared key, not just something that claims to
+			int arr_plain[2] = { response.int_player_id, response.int_nonce };
+			size_t cipher_len = 0;
+			if (security_encrypt((unsigned char *)arr_plain, sizeof(arr_plain),
+				response.arr_cipher, &cipher_len) &&
+				cipher_len <= sizeof(response.arr_cipher))
+			{
+				response.len_cipher = (unsigned long)cipher_len;
+				// Blank the plaintext copy, so the response is only
+				// authentic/readable via the ciphertext
+				response.int_player_id = 0;
+				response.int_nonce = 0;
+			}
+			else
+			{
+				response.len_cipher = 0;
+			}
+
 			rc = dds_write(response_writer, &response);
 			if (rc != DDS_RETCODE_OK)
 			{

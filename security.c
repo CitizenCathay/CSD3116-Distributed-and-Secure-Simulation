@@ -7,27 +7,39 @@
 \brief Implementation of security.h: pre-shared-key client authentication and
        AES-256-GCM encryption of DDS traffic, using OpenSSL's EVP API.
 *******************************************************************************/
-/* Two separate 32-byte pre-shared secrets, compiled into both client.c and
-server.c (both link this same file), so they always agree without any key
-exchange step:
+/* Two separate 32-byte pre-shared secrets, shared by every client and the
+server so they always agree without any key exchange step:
   - g_arr_auth_psk  proves a client is one of ours before the server admits
     it (the credential in JoinRequest.arr_token)
   - g_arr_aes_key   encrypts/decrypts the Input/Position/CellClaimed/
-    GameState payloads with AES-256-GCM
+    GameState/JoinResponse payloads with AES-256-GCM
 
-This is a course-project pre-shared-key scheme, not production key
-management: a real deployment would provision/rotate these out of band
-(per-client credentials, a KMS, mutual TLS) instead of hardcoding one shared
-secret in source that every client and the server compile in identically. */
+Each can be overridden at startup via an environment variable (64 hex
+characters = 32 bytes), so a real run does not have to use the value sitting
+in this source file - see security_init(). The hardcoded fallbacks below
+exist purely so the game still runs out of the box for grading/demos
+without extra setup.
+
+This is still a course-project pre-shared-key scheme, not production key
+management: a real deployment would provision/rotate per-client credentials
+(eg via a KMS or mutual TLS) rather than one shared secret every client and
+the server compile in or export identically. */
 
 #include "security.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
+// Environment variables security_init() checks for a hex-encoded override
+#define AUTH_PSK_ENV_VAR "CSD3116_AUTH_PSK"
+#define AES_KEY_ENV_VAR  "CSD3116_AES_KEY"
+
 // 32 arbitrary bytes - only needs to match between every client and the
-// server, not be memorable or secret-looking
-static const unsigned char g_arr_auth_psk[SECURITY_TOKEN_LEN] =
+// server, not be memorable or secret-looking. Overridden by
+// CSD3116_AUTH_PSK if that is set to 64 valid hex characters
+static unsigned char g_arr_auth_psk[SECURITY_TOKEN_LEN] =
 {
 	0x4a, 0x1f, 0x9c, 0x2e, 0x77, 0xb3, 0x05, 0x8d,
 	0xe1, 0x62, 0xaa, 0x3b, 0x90, 0x14, 0xc7, 0x5f,
@@ -36,8 +48,9 @@ static const unsigned char g_arr_auth_psk[SECURITY_TOKEN_LEN] =
 };
 
 // A second, independent 32-byte secret for AES-256 - never reuse the auth
-// secret as an encryption key
-static const unsigned char g_arr_aes_key[32] =
+// secret as an encryption key. Overridden by CSD3116_AES_KEY if that is
+// set to 64 valid hex characters
+static unsigned char g_arr_aes_key[32] =
 {
 	0x91, 0x3d, 0x6f, 0xc8, 0x22, 0xa0, 0x5b, 0xe7,
 	0x4c, 0x19, 0x8a, 0xf6, 0x37, 0xd1, 0x0e, 0x95,
@@ -55,10 +68,43 @@ static const unsigned char g_arr_aes_key[32] =
 // Wire format for security_encrypt()'s out buffer: [IV][ciphertext][tag]
 #define GCM_OVERHEAD (GCM_IV_LEN + GCM_TAG_LEN)
 
+// Parses a_str_hex as exactly out_len bytes of hex (eg "4a1f9c...",
+// out_len * 2 characters) into out. Leaves out untouched and returns false
+// if a_str_hex is NULL, the wrong length, or contains non-hex characters
+static bool parse_hex_key(const char *a_str_hex, unsigned char *out, size_t out_len)
+{
+	if (!a_str_hex || strlen(a_str_hex) != out_len * 2)
+		return false;
+
+	for (size_t i = 0; i < out_len; i++)
+	{
+		unsigned int int_byte;
+		if (sscanf(a_str_hex + i * 2, "%2x", &int_byte) != 1)
+			return false;
+		out[i] = (unsigned char)int_byte;
+	}
+	return true;
+}
+
 bool security_init(void)
 {
-	// Nothing to allocate: both secrets above are compiled in. A real
-	// implementation using provisioned/rotated keys would load them here
+	// Prefer keys from the environment over the hardcoded defaults above,
+	// so a real run is not stuck with a secret that is sitting in source
+	// control - see this file's header comment
+	const char *str_auth_env = getenv(AUTH_PSK_ENV_VAR);
+	if (str_auth_env && !parse_hex_key(str_auth_env, g_arr_auth_psk, sizeof(g_arr_auth_psk)))
+	{
+		fprintf(stderr, AUTH_PSK_ENV_VAR " must be exactly %zu hex characters - using the built-in default\n",
+			sizeof(g_arr_auth_psk) * 2);
+	}
+
+	const char *str_aes_env = getenv(AES_KEY_ENV_VAR);
+	if (str_aes_env && !parse_hex_key(str_aes_env, g_arr_aes_key, sizeof(g_arr_aes_key)))
+	{
+		fprintf(stderr, AES_KEY_ENV_VAR " must be exactly %zu hex characters - using the built-in default\n",
+			sizeof(g_arr_aes_key) * 2);
+	}
+
 	return true;
 }
 

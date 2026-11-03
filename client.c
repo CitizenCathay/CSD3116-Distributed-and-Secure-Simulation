@@ -789,10 +789,29 @@ void *worker(void *arg)
 			{
 				printf("Join response received\n");
 				JoinResponse *response = (JoinResponse *) samples_response[0];
-				// Responses are broadcast: ignore the ones meant for other clients
-					if (response->int_nonce != request.int_nonce)
+				int int_resp_player_id = response->int_player_id;
+				int int_resp_nonce = response->int_nonce;
+
+				// Authenticate the response - see security.h. The server
+				// already verified us via JoinRequest.arr_token; this lets
+				// us verify the response really came from a holder of the
+				// shared key too, rather than trusting it outright
+				if (response->len_cipher > 0)
+				{
+					unsigned char arr_plain[sizeof(int) * 2];
+					size_t plain_len = 0;
+					if (!security_decrypt(response->arr_cipher, response->len_cipher,
+						arr_plain, &plain_len) || plain_len != sizeof(arr_plain))
+					{
 						continue;
-					int int_resp_player_id = response->int_player_id;
+					}
+					memcpy(&int_resp_player_id, arr_plain, sizeof(int));
+					memcpy(&int_resp_nonce, arr_plain + sizeof(int), sizeof(int));
+				}
+
+				// Responses are broadcast: ignore the ones meant for other clients
+				if (int_resp_nonce != request.int_nonce)
+					continue;
 				// If server responded with an invalid player ID
 				if (int_resp_player_id == 0)
 					{

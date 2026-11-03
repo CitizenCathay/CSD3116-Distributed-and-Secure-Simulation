@@ -24,6 +24,7 @@ this test's main() without first being pulled out into its own DDS-free
 module (eg collision.h/.c) - worth doing if that coverage is wanted later. */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "security.h"
 
@@ -135,6 +136,51 @@ static void test_decrypt_rejects_truncated_ciphertext(void)
 		"ciphertext too short to hold an IV + tag should be rejected, not crash");
 }
 
+// --- Environment-variable key override -------------------------------
+// These two run last: a valid override permanently replaces the active
+// key for the rest of this process, which would otherwise invalidate the
+// round-trip/tamper tests above that assume the built-in default key
+
+static void test_env_var_overrides_auth_key(void)
+{
+	// 32 bytes ("a1" x 32 = 64 hex characters)
+	const char *str_custom_hex =
+		"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+	TEST_ASSERT(strlen(str_custom_hex) == SECURITY_TOKEN_LEN * 2,
+		"test bug: str_custom_hex must be exactly 64 hex characters");
+
+	setenv("CSD3116_AUTH_PSK", str_custom_hex, 1);
+	TEST_ASSERT(security_init() == true, "security_init() should still succeed");
+
+	char arr_token[SECURITY_TOKEN_LEN];
+	security_make_client_token(arr_token, sizeof(arr_token));
+	TEST_ASSERT(security_verify_client_token(arr_token) == true,
+		"a token made after overriding the key should still round-trip");
+
+	char arr_other[SECURITY_TOKEN_LEN];
+	memset(arr_other, 0x99, sizeof(arr_other));
+	TEST_ASSERT(security_verify_client_token(arr_other) == false,
+		"an unrelated token should still be rejected under the overridden key");
+
+	unsetenv("CSD3116_AUTH_PSK");
+}
+
+static void test_env_var_invalid_falls_back_safely(void)
+{
+	// Too short, and not hex - security_init() must not crash, and
+	// whatever key was already active (the override above) stays in place
+	setenv("CSD3116_AUTH_PSK", "not-a-valid-key", 1);
+	TEST_ASSERT(security_init() == true,
+		"an invalid override should not stop security_init() from succeeding");
+
+	char arr_token[SECURITY_TOKEN_LEN];
+	security_make_client_token(arr_token, sizeof(arr_token));
+	TEST_ASSERT(security_verify_client_token(arr_token) == true,
+		"make/verify should still round-trip with whichever key is active");
+
+	unsetenv("CSD3116_AUTH_PSK");
+}
+
 int main(void)
 {
 	test_init_cleanup();
@@ -144,6 +190,8 @@ int main(void)
 	test_encrypt_is_randomized();
 	test_decrypt_rejects_tampered_ciphertext();
 	test_decrypt_rejects_truncated_ciphertext();
+	test_env_var_overrides_auth_key();
+	test_env_var_invalid_falls_back_safely();
 
 	printf("%d/%d tests passed\n",
 		g_int_tests_run - g_int_tests_failed, g_int_tests_run);
