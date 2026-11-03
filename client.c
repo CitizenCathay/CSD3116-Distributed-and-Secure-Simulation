@@ -33,6 +33,7 @@ Slide 12 threading, Slide 14 tasks. */
 #include <time.h>
 #include <math.h>
 #include <pthread.h>
+#include <signal.h>
 #include <unistd.h>
 #include "dds/dds.h"
 #include "messages.h"
@@ -82,6 +83,58 @@ static bool b_round_started = false;
 static bool b_game_over = false;
 static int int_winner_id = 0;
 
+// Cleared by the main thread when the window closes, so the worker thread
+// leaves its loop and shuts DDS down. Guarded by mutex
+static bool b_running = true;
+
+// True while the server has refused us a slot because the game is full. We
+// then just watch (the state messages arrive regardless) and keep retrying
+// the join, so we get in automatically if a player leaves. Guarded by mutex
+static bool b_spectating = false;
+
+// Set by Ctrl+C / SIGTERM in the terminal, so the client leaves the game the
+// same clean way as closing the window does
+static volatile sig_atomic_t g_quit_requested = 0;
+
+static void on_quit_signal(int a_int_signal)
+{
+	(void)a_int_signal;
+	g_quit_requested = 1;
+}
+
+// "Player N left" messages shown briefly on screen
+#define MAX_NOTICES 3
+#define NOTICE_SECS 4.0
+#define NOTICE_FADE_SECS 0.5
+
+typedef struct
+{
+	int int_player_id;   // 0 = empty slot
+	double d_time;       // glfwGetTime() when the player left
+} LeaveNotice;
+
+// Written by the worker thread, drawn by the main thread. Guarded by mutex
+static LeaveNotice arr_notices[MAX_NOTICES];
+
+// Records that a_int_player_id just left, reusing an empty slot or else
+// replacing the oldest notice. The caller must hold mutex
+static void push_leave_notice(int a_int_player_id)
+{
+	int int_slot = 0;
+	for (int i = 0; i < MAX_NOTICES; i++)
+	{
+		if (arr_notices[i].int_player_id == 0)
+		{
+			int_slot = i;
+			break;
+		}
+		if (arr_notices[i].d_time < arr_notices[int_slot].d_time)
+			int_slot = i;
+	}
+	arr_notices[int_slot].int_player_id = a_int_player_id;
+	arr_notices[int_slot].d_time = glfwGetTime();
+}
+
 // Direction - n means no direction
 char ch_dir = 'n';
 // Guards the variables shared by the main (rendering) thread and the DDS
@@ -90,7 +143,10 @@ pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void draw_text(float x, float y, float scale, const char *text)
 {
-    char buffer[4096];
+    // stb_easy_font silently stops drawing once this buffer is full, and each
+    // character needs a few hundred bytes - 4096 cut off strings of about 22
+    // characters (eg "Player 2 left the game"), so leave plenty of room
+    char buffer[16384];
 
     int num_quads = stb_easy_font_print(
         0, 0,
@@ -287,7 +343,8 @@ static void draw_players(const Player a_arr_players[], int a_int_own_id,
 // Top strip (who you are, countdown, time bar) and bottom strip
 // (territory bar, per-player cell counts)
 static void draw_hud(const Grid *a_grid, const Player a_arr_players[],
-	int a_int_own_id, int a_int_secs, bool a_b_started, double a_d_time)
+	int a_int_own_id, int a_int_secs, bool a_b_started, double a_d_time,
+	bool a_b_spectating)
 {
 	char str_text[32];
 	bool b_low = a_b_started && a_int_secs <= 10;
@@ -302,6 +359,10 @@ static void draw_hud(const Grid *a_grid, const Player a_arr_players[],
 	{
 		snprintf(str_text, sizeof(str_text), "Player %d", a_int_own_id);
 		draw_label(12, 14, 2.5f, arr_colors[a_int_own_id - 1], 1.0f, str_text);
+	}
+	else if (a_b_spectating)
+	{
+		draw_label(12, 14, 2.5f, arr_white, 0.9f, "Spectator");
 	}
 	else
 	{
@@ -414,6 +475,95 @@ static void draw_end_screen(const Grid *a_grid, const Player a_arr_players[],
 			grid_count_owned(a_grid, i + 1));
 		draw_label(f_panel_x + 150.0f, f_y + 1.0f, 2.5f, arr_white, 1.0f, str_text);
 		int_line++;
+	}
+}
+
+// Small banners under the top bar announcing who left, fading out after
+// NOTICE_SECS. Newer banners sit lower in the stack
+static void draw_notices(const LeaveNotice a_arr_notices[], double a_d_now)
+{
+	int int_row = 0;
+	for (int i = 0; i < MAX_NOTICES; i++)
+	{
+		int int_id = a_arr_notices[i].int_player_id;
+		double d_age = a_d_now - a_arr_notices[i].d_time;
+		if (int_id < 1 || int_id > MAX_PLAYERS || d_age < 0.0 || d_age >= NOTICE_SECS)
+			continue;
+
+		float f_alpha = 1.0f;
+		if (d_age > NOTICE_SECS - NOTICE_FADE_SECS)
+			f_alpha = (float)((NOTICE_SECS - d_age) / NOTICE_FADE_SECS);
+
+		char str_text[32];
+		snprintf(str_text, sizeof(str_text), "Player %d left the game", int_id);
+		float f_text_w = stb_easy_font_width((char *)str_text) * 2.0f;
+		float f_w = f_text_w + 44.0f;
+		float f_x = (WIDTH - f_w) / 2.0f;
+		float f_y = 58.0f + int_row * 32.0f;
+
+		glColor4f(0.0f, 0.0f, 0.0f, 0.7f * f_alpha);
+		draw_rect(f_x, f_y, f_w, 26.0f);
+		glColor4f(arr_colors[int_id - 1][0], arr_colors[int_id - 1][1],
+			arr_colors[int_id - 1][2], f_alpha);
+		draw_rect(f_x + 8.0f, f_y + 6.0f, 14.0f, 14.0f);
+		draw_label(f_x + 30.0f, f_y + 6.0f, 2.0f, arr_white, f_alpha, str_text);
+		int_row++;
+	}
+}
+
+// Banner for a client refused a slot because the game is full: it can still
+// watch, and joins automatically when a player leaves
+static void draw_spectator_banner(double a_d_time)
+{
+	static const float arr_amber[3] = { 1.0f, 0.8f, 0.3f };
+	const char *str_title = "GAME FULL - SPECTATING";
+	const char *str_sub = "You will join automatically when a spot opens";
+
+	float f_alpha = 0.75f + 0.25f * sinf((float)a_d_time * 3.0f);
+	float f_title_w = stb_easy_font_width((char *)str_title) * 3.0f;
+	float f_sub_w = stb_easy_font_width((char *)str_sub) * 1.5f;
+	float f_w = (f_title_w > f_sub_w ? f_title_w : f_sub_w) + 40.0f;
+	// Sits just above the bottom strip
+	float f_y = HEIGHT - 56.0f - 62.0f - 8.0f;
+
+	glColor4f(0.0f, 0.0f, 0.0f, 0.75f);
+	draw_rect((WIDTH - f_w) / 2.0f, f_y, f_w, 62.0f);
+	draw_label_centered(WIDTH / 2.0f, f_y + 8.0f, 3.0f, arr_amber, f_alpha, str_title);
+	draw_label_centered(WIDTH / 2.0f, f_y + 40.0f, 1.5f, arr_white, 0.9f, str_sub);
+}
+
+// Sends one Input for a_int_player_id: the arrow-key direction, or 'n' for
+// none. Used both for real moves and for the first "hello" Input
+static void publish_input(dds_entity_t a_writer, int a_int_player_id,
+	char a_ch_direction)
+{
+	Input input;
+	memset(&input, 0, sizeof(input));
+	input.int_player_id = a_int_player_id;
+	input.ch_direction = a_ch_direction;
+
+	// Encrypt the payload before publishing - see security.h
+	// len_cipher stays 0 (plaintext fields above are used instead) until
+	// security_encrypt() is implemented
+	unsigned char arr_plain[sizeof(int) + sizeof(char)];
+	memcpy(arr_plain, &input.int_player_id, sizeof(int));
+	memcpy(arr_plain + sizeof(int), &input.ch_direction, sizeof(char));
+	size_t cipher_len = 0;
+	if (security_encrypt(arr_plain, sizeof(arr_plain),
+		input.arr_cipher, &cipher_len) &&
+		cipher_len <= sizeof(input.arr_cipher))
+	{
+		input.len_cipher = (unsigned long)cipher_len;
+	}
+	else
+	{
+		input.len_cipher = 0;
+	}
+
+	dds_return_t rc = dds_write(a_writer, &input);
+	if (rc != DDS_RETCODE_OK)
+	{
+		DDS_FATAL("dds_write: %s\n", dds_strretcode(-rc));
 	}
 }
 
@@ -605,9 +755,18 @@ void *worker(void *arg)
 
 	// Record the time now
 	uint64_t last_join_req_time = dds_time();
+	// Whether our first (no-direction) Input has gone out yet
+	bool b_sent_hello = false;
 	/* printf("last_join_req_time = %" PRIu64 "\n", last_join_req_time); */
 	while (1)
 	{
+		// Stop once the main thread says the window has closed
+		pthread_mutex_lock(&mutex);
+		bool b_keep_running = b_running;
+		pthread_mutex_unlock(&mutex);
+		if (!b_keep_running)
+			break;
+
 		// If not in a game yet: send Join Requests until the server answers
 		// with our player ID (Slide 11, Figure 4a)
 		pthread_mutex_lock(&mutex);
@@ -632,13 +791,22 @@ void *worker(void *arg)
 					int int_resp_player_id = response->int_player_id;
 				// If server responded with an invalid player ID
 				if (int_resp_player_id == 0)
-					printf("Unable to join\n");
+					{
+						// Game full: spectate, and keep retrying the join
+						pthread_mutex_lock(&mutex);
+						bool b_first_refusal = !b_spectating;
+						b_spectating = true;
+						pthread_mutex_unlock(&mutex);
+						if (b_first_refusal)
+							printf("Game full - spectating until a spot opens\n");
+					}
 				else
 				{
 					// printf("Join response player ID = %d\n", response->int_player_id);
 					pthread_mutex_lock(&mutex);
 					// Update player ID
 					int_player_id = int_resp_player_id;
+						b_spectating = false;
 						printf("Joined as player %d\n", int_resp_player_id);
 					pthread_mutex_unlock(&mutex);
 				}
@@ -676,42 +844,19 @@ void *worker(void *arg)
 			pthread_mutex_lock(&mutex);
 			char ch_dir_temp = ch_dir;
 			pthread_mutex_unlock(&mutex);
+			// Send one no-direction Input as soon as we are in the game, so the
+			// server has an Input instance for us even if we never press a key.
+			// Closing the window before the first move would otherwise go
+			// unnoticed by the server
+			if (!b_sent_hello)
+			{
+				publish_input(input_writer, int_player_id_temp, 'n');
+				b_sent_hello = true;
+			}
 			// If there is some direction input
 			if(ch_dir_temp != 'n')
 			{
-				// Create a fresh input
-				Input input;
-				input.int_player_id = int_player_id;
-
-				// Set the direction in the message
-				input.ch_direction = ch_dir_temp;
-
-				// Encrypt the payload before publishing - see security.h
-				// len_cipher stays 0 (plaintext fields above are used
-				// instead) until security_encrypt() is implemented
-				unsigned char arr_plain[sizeof(int) + sizeof(char)];
-				memcpy(arr_plain, &input.int_player_id, sizeof(int));
-				memcpy(arr_plain + sizeof(int), &input.ch_direction, sizeof(char));
-				size_t cipher_len = 0;
-				if (security_encrypt(arr_plain, sizeof(arr_plain),
-					input.arr_cipher, &cipher_len) &&
-					cipher_len <= sizeof(input.arr_cipher))
-				{
-					input.len_cipher = (unsigned long)cipher_len;
-				}
-				else
-				{
-					input.len_cipher = 0;
-				}
-
-				// Send input
-				rc = dds_write(input_writer, &input);
-				// printf("curr_time = %" PRIu64 "\n", dds_time());
-				if (rc != DDS_RETCODE_OK)
-				{
-					DDS_FATAL("dds_write: %s\n", dds_strretcode(-rc));
-				}
-				// printf("Input sent\n");
+				publish_input(input_writer, int_player_id_temp, ch_dir_temp);
 				// Throttle to MOVE_REPEAT_MSECS, so holding a key steps one
 				// grid cell at a time instead of blurring across several
 				dds_sleepfor(DDS_MSECS(MOVE_REPEAT_MSECS));
@@ -809,7 +954,28 @@ void *worker(void *arg)
 		while ((rc = dds_take(position_reader, samples_position, infos_position, MAX_SAMPLES, MAX_SAMPLES)) > 0)
 		{
 			if (!infos_position[0].valid_data)
+			{
+				// A disposed Position instance means the server dropped that
+				// player (they left), so stop drawing their square
+				if (infos_position[0].instance_state != DDS_ALIVE_INSTANCE_STATE)
+				{
+					int int_left_id = ((Position *) samples_position[0])->int_player_id;
+					if (int_left_id >= 1 && int_left_id <= MAX_PLAYERS)
+					{
+						pthread_mutex_lock(&mutex);
+						bool b_was_active = arr_Players[int_left_id - 1].b_active;
+						arr_Players[int_left_id - 1].b_active = false;
+						// Announce it on screen, but only once and not for ourselves
+						if (b_was_active && int_left_id != int_player_id)
+						{
+							push_leave_notice(int_left_id);
+							printf("Player %d left the game\n", int_left_id);
+						}
+						pthread_mutex_unlock(&mutex);
+					}
+				}
 				continue;
+			}
 
 			// printf("Position received\n");
 			Position *position = (Position *) samples_position[0];
@@ -845,6 +1011,10 @@ void *worker(void *arg)
 		if (rc < 0)
 			DDS_FATAL("dds_take: %s\n", dds_strretcode(-rc));
 	}
+	// Deleting the participant removes our writers, which is how the server
+	// learns we left: our Input instance goes not-alive (see server.c)
+	dds_delete(participant);
+	return NULL;
 }
 
 // Entry point of the application
@@ -855,6 +1025,9 @@ int main(void)
 		fprintf(stderr, "security_init failed\n");
 		return 1;
 	}
+
+	signal(SIGINT, on_quit_signal);
+	signal(SIGTERM, on_quit_signal);
 
 	grid_init(&grid);
 
@@ -901,7 +1074,7 @@ int main(void)
 
 	double d_last_frame = glfwGetTime();
 
-    while (!glfwWindowShouldClose(window))
+    while (!glfwWindowShouldClose(window) && !g_quit_requested)
     {
 		 /* Process keyboard/window events */
         glfwPollEvents();
@@ -956,9 +1129,12 @@ int main(void)
 			Grid grid_snap = grid;
 		Player arr_players_snap[MAX_PLAYERS];
 		memcpy(arr_players_snap, arr_Players, sizeof(arr_players_snap));
+		LeaveNotice arr_notices_snap[MAX_NOTICES];
+		memcpy(arr_notices_snap, arr_notices, sizeof(arr_notices_snap));
 		int int_own_snap = int_player_id;
 			int int_secs_snap = int_seconds_left;
 			bool b_started_snap = b_round_started;
+		bool b_spectating_snap = b_spectating;
 			bool b_over_snap = b_game_over;
 			int int_winner_snap = int_winner_id;
 			pthread_mutex_unlock(&mutex);
@@ -966,7 +1142,10 @@ int main(void)
 		draw_cells(&grid_snap, f_dt);
 		draw_players(arr_players_snap, int_own_snap, d_now);
 		draw_hud(&grid_snap, arr_players_snap, int_own_snap, int_secs_snap,
-			b_started_snap, d_now);
+			b_started_snap, d_now, b_spectating_snap);
+		draw_notices(arr_notices_snap, d_now);
+		if (b_spectating_snap)
+			draw_spectator_banner(d_now);
 
 			if (!b_started_snap)
 			draw_waiting(d_now);
@@ -977,6 +1156,13 @@ int main(void)
 		// (eg software rendering under WSL), which leaves the loop spinning
 		usleep(16000);
     }
+
+    // Tell the worker thread to finish and wait for it, so DDS is shut down
+	// cleanly - that is what lets the server notice we left
+	pthread_mutex_lock(&mutex);
+	b_running = false;
+	pthread_mutex_unlock(&mutex);
+	pthread_join(thread, NULL);
 
     glfwDestroyWindow(window);
     glfwTerminate();

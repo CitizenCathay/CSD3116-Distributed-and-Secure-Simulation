@@ -146,6 +146,57 @@ static void publish_game_state(dds_entity_t a_writer, int a_int_seconds_left,
 	}
 }
 
+// Frees a departed player's slot: marks them inactive, releases their cells
+// back to unclaimed, and disposes their Position instance so every client
+// stops drawing their square. The freed slot can then be taken by a new
+// player through the normal join flow
+static void handle_player_left(int a_int_player_id, Grid *a_grid,
+	dds_entity_t a_cell_writer, dds_entity_t a_position_writer)
+{
+	if (a_int_player_id < 1 || a_int_player_id > MAX_PLAYERS)
+		return;
+
+	pthread_mutex_lock(&mutex);
+	bool b_was_active = arr_Players[a_int_player_id - 1].b_active;
+	if (b_was_active)
+	{
+		arr_Players[a_int_player_id - 1].b_active = false;
+		int_num_active_players--;
+	}
+	pthread_mutex_unlock(&mutex);
+
+	// Already handled: DDS can report the same instance more than once
+	if (!b_was_active)
+		return;
+
+	// Release their cells, so a new player who reuses this ID does not
+	// inherit them (and their score)
+	for (int int_row = 0; int_row < GRID_ROWS; int_row++)
+	{
+		for (int int_col = 0; int_col < GRID_COLS; int_col++)
+		{
+			if (a_grid->arr_owner[int_row * GRID_COLS + int_col] == a_int_player_id)
+			{
+				grid_set_owner(a_grid, int_col, int_row, GRID_UNCLAIMED);
+				publish_cell_claimed(a_cell_writer, int_col, int_row, GRID_UNCLAIMED);
+			}
+		}
+	}
+
+	// Disposing the keyed Position instance tells every client to drop this
+	// player's square
+	Position position;
+	memset(&position, 0, sizeof(position));
+	position.int_player_id = a_int_player_id;
+	dds_return_t rc = dds_dispose(a_position_writer, &position);
+	if (rc != DDS_RETCODE_OK)
+	{
+		DDS_FATAL("dds_dispose: %s\n", dds_strretcode(-rc));
+	}
+
+	printf("Player %d left\n", a_int_player_id);
+}
+
 // DDS worker thread (Slide 12): handles all DDS traffic - join requests and
 // responses, input from clients, position/cell/timer updates to clients -
 // so that a delayed message never stalls the main thread's game state
@@ -550,7 +601,16 @@ void *worker(void *arg)
 		while ((rc = dds_take(input_reader, samples_input, infos_input, MAX_SAMPLES, MAX_SAMPLES)) > 0)
 		{
 			if (!infos_input[0].valid_data)
+			{
+				// A not-alive Input instance means that client's DDS writer is
+				// gone (window closed, or the process died), so free their slot
+				if (infos_input[0].instance_state != DDS_ALIVE_INSTANCE_STATE)
+				{
+					handle_player_left(((Input *) samples_input[0])->int_player_id,
+						&grid, cell_writer, position_writer);
+				}
 				continue;
+			}
 
 			// printf("Input received\n");
 			Input *input = (Input *) samples_input[0];
@@ -575,12 +635,17 @@ void *worker(void *arg)
 				}
 			}
             
+			// Ignore input from an unknown player ID, since it indexes arr_Players
+			if (int_input_player_id < 1 || int_input_player_id > MAX_PLAYERS)
+				continue;
+
 			// Compute the move and apply it if legal - see game_logic.h
 				// (a square may not leave the window or overlap another
 				// player's square, Slide 7)
 			pthread_mutex_lock(&mutex);
 			int int_new_x, int_new_y;
-			bool b_moved = game_try_move(arr_Players, MAX_PLAYERS,
+			bool b_moved = arr_Players[int_input_player_id - 1].b_active &&
+				game_try_move(arr_Players, MAX_PLAYERS,
 				int_input_player_id, ch_input_dir, &int_new_x, &int_new_y);
 			// Players are frozen once the round is over
 			if (b_moved && !b_game_over)
