@@ -1,7 +1,15 @@
-/* security.h
-Shared by server.c and client.c, both of which already call every
+/*****************************************************************************
+\file security.h
+\author regine wong (w.shiyuregine@digipen.edu)
+\par Course: CSD3116
+\par Assignment: Week 1 Team Lab
+\date 11/02/2026 (MM/DD/YYYY)
+\brief Authentication and encryption API shared by the server and client: client
+       token creation/verification and encrypt/decrypt of DDS payloads.
+*******************************************************************************/
+/* Shared by server.c and client.c, both of which already call every
 function below at the right place (join handshake, Input/Position
-publish and receive). Covers the two required security features:
+publish and receive). Covers the two required security features (Slide 14, Tasks):
 1. Authentication of clients (during Join Request/Response)
 2. Encryption of DDS traffic (Input and Position messages)
 

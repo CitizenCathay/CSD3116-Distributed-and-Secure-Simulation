@@ -18,11 +18,11 @@ all: server client
 messages.h messages.c: messages.idl
 	$(IDLC) -l c messages.idl
 
-server: server.c security.c game_logic.c messages.c
-	$(CC) -o server server.c security.c game_logic.c messages.c $(CFLAGS_DDS) $(LIBS_DDS)
+server: server.c security.c game_logic.c grid_logic.c messages.c
+	$(CC) -o server server.c security.c game_logic.c grid_logic.c messages.c $(CFLAGS_DDS) $(LIBS_DDS)
 
-client: client.c security.c game_logic.c messages.c
-	$(CC) client.c security.c game_logic.c messages.c -o client \
+client: client.c security.c game_logic.c grid_logic.c messages.c
+	$(CC) client.c security.c game_logic.c grid_logic.c messages.c -o client \
 		$(CFLAGS_GLFW) -lGL $(LIBS_GLFW) $(CFLAGS_DDS) $(LIBS_DDS) -pthread -lm
 
 test_security: test_security.c security.c
@@ -31,9 +31,13 @@ test_security: test_security.c security.c
 test_game_logic: test_game_logic.c game_logic.c
 	$(CC) test_game_logic.c game_logic.c -o test_game_logic
 
-test: test_security test_game_logic
+test_grid_logic: test_grid_logic.c grid_logic.c game_logic.c
+	$(CC) test_grid_logic.c grid_logic.c game_logic.c -o test_grid_logic
+
+test: test_security test_game_logic test_grid_logic
 	./test_security
 	./test_game_logic
+	./test_grid_logic
 
 clean:
-	rm -f server client test_security test_game_logic messages.h messages.c
+	rm -f server client test_security test_game_logic test_grid_logic messages.h messages.c

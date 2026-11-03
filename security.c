@@ -1,5 +1,12 @@
-/* security.c
-Empty skeleton for security.h - see that file for how each function
+/*****************************************************************************
+\file security.c
+\author regine wong (w.shiyuregine@digipen.edu)
+\par Course: CSD3116
+\par Assignment: Week 1 Team Lab
+\date 11/02/2026 (MM/DD/YYYY)
+\brief Implementation of security.h (currently an empty skeleton with TODOs).
+*******************************************************************************/
+/* Empty skeleton for security.h - see that file for how each function
 is meant to be used by server.c and client.c.
 
 TODO: pick a crypto library (e.g. OpenSSL EVP, libsodium) and include

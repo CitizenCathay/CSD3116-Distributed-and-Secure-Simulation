@@ -39,9 +39,10 @@ by hand.)
 | `server.c` | DDS server - owns the authoritative game state |
 | `client.c` | DDS client - one per player, renders the game and sends input |
 | `game_logic.h`, `game_logic.c` | Pure game-rule logic (collision, spawn, movement) - no DDS/GLFW, unit-tested |
+| `grid_logic.h`, `grid_logic.c` | Pure "color the floor" rules (cell claiming, scores, winner, round timer) - no DDS/GLFW, unit-tested |
 | `security.h`, `security.c` | Auth + DDS-encryption hooks - wired into server/client, bodies still TODO stubs |
 | `stb_easy_font.h` | Vendored third-party font renderer (draws player labels) |
-| `test_security.c`, `test_game_logic.c` | Unit tests - build with plain `gcc`, no other deps |
+| `test_security.c`, `test_game_logic.c`, `test_grid_logic.c` | Unit tests - build with plain `gcc`, no other deps |
 | `Makefile` | `make`, `make test`, `make clean` |
 
 ## Architecture
