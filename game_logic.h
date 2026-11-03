@@ -2,6 +2,7 @@
 \file game_logic.h
 \author Dr Khoo Teck Ping
 \co-author regine wong (w.shiyuregine@digipen.edu)
+\co-author choi meng yew (choi.m@digipen.edu)
 \par Course: CSD3116
 \par Assignment: Week 1 Team Lab
 \date 11/02/2026 (MM/DD/YYYY)
