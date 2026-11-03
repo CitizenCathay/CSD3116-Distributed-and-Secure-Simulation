@@ -10,7 +10,9 @@
 /* Two separate 32-byte pre-shared secrets, shared by every client and the
 server so they always agree without any key exchange step:
   - g_arr_auth_psk  proves a client is one of ours before the server admits
-    it (the credential in JoinRequest.arr_token)
+    it. The credential in JoinRequest.arr_token is an HMAC-SHA256 of the
+    request's nonce under this key, so the key itself never goes over the
+    network where anyone on the DDS domain could read it
   - g_arr_aes_key   encrypts/decrypts the Input/Position/CellClaimed/
     GameState/JoinResponse payloads with AES-256-GCM
 
@@ -29,7 +31,9 @@ the server compile in or export identically. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/rand.h>
 
 // Environment variables security_init() checks for a hex-encoded override
@@ -68,6 +72,10 @@ static unsigned char g_arr_aes_key[32] =
 // Wire format for security_encrypt()'s out buffer: [IV][ciphertext][tag]
 #define GCM_OVERHEAD (GCM_IV_LEN + GCM_TAG_LEN)
 
+// Prefixed to the nonce before it is HMAC'd, so a join token can never be
+// mistaken for an HMAC computed for some other purpose under the same key
+#define JOIN_TOKEN_LABEL "CSD3116-join"
+
 // Parses a_str_hex as exactly out_len bytes of hex (eg "4a1f9c...",
 // out_len * 2 characters) into out. Leaves out untouched and returns false
 // if a_str_hex is NULL, the wrong length, or contains non-hex characters
@@ -90,22 +98,43 @@ bool security_init(void)
 {
 	// Prefer keys from the environment over the hardcoded defaults above,
 	// so a real run is not stuck with a secret that is sitting in source
-	// control - see this file's header comment
+	// control - see this file's header comment. A variable that is set but
+	// malformed is an error, not a reason to fall back to the public default
+	// key, which would silently leave the game open to anyone with the source
 	const char *str_auth_env = getenv(AUTH_PSK_ENV_VAR);
 	if (str_auth_env && !parse_hex_key(str_auth_env, g_arr_auth_psk, sizeof(g_arr_auth_psk)))
 	{
-		fprintf(stderr, AUTH_PSK_ENV_VAR " must be exactly %zu hex characters - using the built-in default\n",
+		fprintf(stderr, AUTH_PSK_ENV_VAR " must be exactly %zu hex characters\n",
 			sizeof(g_arr_auth_psk) * 2);
+		return false;
 	}
 
 	const char *str_aes_env = getenv(AES_KEY_ENV_VAR);
 	if (str_aes_env && !parse_hex_key(str_aes_env, g_arr_aes_key, sizeof(g_arr_aes_key)))
 	{
-		fprintf(stderr, AES_KEY_ENV_VAR " must be exactly %zu hex characters - using the built-in default\n",
+		fprintf(stderr, AES_KEY_ENV_VAR " must be exactly %zu hex characters\n",
 			sizeof(g_arr_aes_key) * 2);
+		return false;
 	}
 
 	return true;
+}
+
+// Computes HMAC-SHA256(g_arr_auth_psk, JOIN_TOKEN_LABEL || nonce) into
+// out_mac (SECURITY_TOKEN_LEN bytes). The nonce is encoded big-endian so
+// client and server agree regardless of byte order
+static bool make_join_mac(int a_int_nonce, unsigned char *out_mac)
+{
+	unsigned char arr_msg[sizeof(JOIN_TOKEN_LABEL) - 1 + 4];
+	unsigned int uint_nonce = (unsigned int)a_int_nonce;
+	memcpy(arr_msg, JOIN_TOKEN_LABEL, sizeof(JOIN_TOKEN_LABEL) - 1);
+	for (int i = 0; i < 4; i++)
+		arr_msg[sizeof(JOIN_TOKEN_LABEL) - 1 + i] = (unsigned char)(uint_nonce >> (24 - 8 * i));
+
+	unsigned int uint_mac_len = 0;
+	return HMAC(EVP_sha256(), g_arr_auth_psk, sizeof(g_arr_auth_psk),
+		arr_msg, sizeof(arr_msg), out_mac, &uint_mac_len) != NULL &&
+		uint_mac_len == SECURITY_TOKEN_LEN;
 }
 
 void security_cleanup(void)
@@ -113,23 +142,28 @@ void security_cleanup(void)
 	// Nothing was allocated by security_init()
 }
 
-void security_make_client_token(char *out_token, size_t token_len)
+void security_make_client_token(int a_int_nonce, char *out_token, size_t token_len)
 {
+	unsigned char arr_mac[SECURITY_TOKEN_LEN];
+	// An all-zero token is always rejected, so a failed HMAC just means the
+	// join is refused rather than sending whatever was in out_token
+	if (!make_join_mac(a_int_nonce, arr_mac))
+		memset(arr_mac, 0, sizeof(arr_mac));
+
 	size_t copy_len = token_len < SECURITY_TOKEN_LEN ? token_len : SECURITY_TOKEN_LEN;
-	memcpy(out_token, g_arr_auth_psk, copy_len);
+	memcpy(out_token, arr_mac, copy_len);
 }
 
-bool security_verify_client_token(const char *token)
+bool security_verify_client_token(int a_int_nonce, const char *token)
 {
+	unsigned char arr_expected[SECURITY_TOKEN_LEN];
+	if (!make_join_mac(a_int_nonce, arr_expected))
+		return false;
+
 	// Constant-time compare: a length/early-exit compare (eg memcmp) would
-	// let an attacker learn the secret one byte at a time by timing how
-	// many leading bytes matched across many join attempts
-	unsigned char b_diff = 0;
-	for (size_t i = 0; i < SECURITY_TOKEN_LEN; i++)
-	{
-		b_diff |= (unsigned char)token[i] ^ g_arr_auth_psk[i];
-	}
-	return b_diff == 0;
+	// let an attacker learn the expected MAC one byte at a time by timing
+	// how many leading bytes matched across many join attempts
+	return CRYPTO_memcmp(arr_expected, token, SECURITY_TOKEN_LEN) == 0;
 }
 
 bool security_encrypt(const unsigned char *in, size_t in_len,
@@ -178,9 +212,11 @@ bool security_encrypt(const unsigned char *in, size_t in_len,
 }
 
 bool security_decrypt(const unsigned char *in, size_t in_len,
-                       unsigned char *out, size_t *out_len)
+                       unsigned char *out, size_t out_cap, size_t *out_len)
 {
-	if (in_len < GCM_OVERHEAD)
+	// in_len comes straight from the network (len_cipher), so bound it by
+	// the fixed arr_cipher size before reading the tag from its end
+	if (in_len < GCM_OVERHEAD || in_len > SECURITY_CIPHERTEXT_LEN)
 		return false;
 
 	size_t cipher_len = in_len - GCM_OVERHEAD;
@@ -198,27 +234,37 @@ bool security_decrypt(const unsigned char *in, size_t in_len,
 	bool b_ok = false;
 	int int_len = 0;
 	int int_plain_len = 0;
+	// GCM's DecryptUpdate emits plaintext before the tag is checked, so
+	// decrypt into a scratch buffer sized for the largest possible
+	// plaintext and only copy it to out once it has been authenticated -
+	// otherwise a forged message could write past a small caller buffer
+	unsigned char arr_scratch[SECURITY_CIPHERTEXT_LEN];
 
 	if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) == 1 &&
 		EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, GCM_IV_LEN, NULL) == 1 &&
 		EVP_DecryptInit_ex(ctx, NULL, NULL, g_arr_aes_key, ptr_iv) == 1 &&
-		EVP_DecryptUpdate(ctx, out, &int_len, ptr_cipher, (int)cipher_len) == 1)
+		EVP_DecryptUpdate(ctx, arr_scratch, &int_len, ptr_cipher, (int)cipher_len) == 1)
 	{
 		int_plain_len = int_len;
 
 		if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, GCM_TAG_LEN, arr_tag) == 1 &&
-			EVP_DecryptFinal_ex(ctx, out + int_plain_len, &int_len) == 1)
+			EVP_DecryptFinal_ex(ctx, arr_scratch + int_plain_len, &int_len) == 1)
 		{
 			// EVP_DecryptFinal_ex() only succeeds if the computed tag
 			// matches arr_tag, so reaching here means the ciphertext (and
 			// the player/cell/position fields packed into it) is both
 			// genuinely from a holder of g_arr_aes_key and unmodified
 			int_plain_len += int_len;
-			*out_len = (size_t)int_plain_len;
-			b_ok = true;
+			if ((size_t)int_plain_len <= out_cap)
+			{
+				memcpy(out, arr_scratch, (size_t)int_plain_len);
+				*out_len = (size_t)int_plain_len;
+				b_ok = true;
+			}
 		}
 	}
 
+	OPENSSL_cleanse(arr_scratch, sizeof(arr_scratch));
 	EVP_CIPHER_CTX_free(ctx);
 	return b_ok;
 }

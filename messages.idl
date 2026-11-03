@@ -9,7 +9,8 @@ struct JoinRequest
 	// Random per-client value, echoed back in JoinResponse so each client
 	// can tell its own response from the ones meant for other clients
 	long int_nonce;
-	// Credential presented for authentication - see security.h
+	// Credential presented for authentication: an HMAC of int_nonce under
+	// the pre-shared key - see security.h
 	// Length must match SECURITY_TOKEN_LEN in security.h
 	char arr_token[32];
 };
@@ -24,8 +25,8 @@ struct JoinResponse
 	// server already authenticates the client via JoinRequest.arr_token;
 	// this lets the client authenticate the response in return, so it
 	// does not trust a player ID that did not come from a holder of the
-	// shared key. len_cipher == 0 means encryption is not in use (fall
-	// back to the plaintext fields above); arr_cipher size must match
+	// shared key. Samples with len_cipher == 0 or a cipher that fails to
+	// decrypt are dropped; arr_cipher size must match
 	// SECURITY_CIPHERTEXT_LEN in security.h
 	octet arr_cipher[64];
 	unsigned long len_cipher;
@@ -40,9 +41,9 @@ struct Input
 	@key long int_player_id;
     char ch_direction;
 	// Encrypted copy of this message's payload - see security.h
-	// len_cipher == 0 means encryption is not in use (fall back to the
-	// plaintext fields above); arr_cipher size must match
-	// SECURITY_CIPHERTEXT_LEN in security.h
+	// Samples with len_cipher == 0 or a cipher that fails to decrypt are
+	// dropped; arr_cipher size must match SECURITY_CIPHERTEXT_LEN in
+	// security.h
 	octet arr_cipher[64];
 	unsigned long len_cipher;
 };
@@ -58,9 +59,9 @@ struct CellClaimed
 	// 0 = unclaimed, otherwise the player ID
 	long int_owner_id;
 	// Encrypted copy of this message's payload - see security.h
-	// len_cipher == 0 means encryption is not in use (fall back to the
-	// plaintext fields above); arr_cipher size must match
-	// SECURITY_CIPHERTEXT_LEN in security.h
+	// Samples with len_cipher == 0 or a cipher that fails to decrypt are
+	// dropped; arr_cipher size must match SECURITY_CIPHERTEXT_LEN in
+	// security.h
 	octet arr_cipher[64];
 	unsigned long len_cipher;
 };
@@ -76,9 +77,9 @@ struct GameState
 	// Only meaningful once b_game_over is true; 0 = draw
 	long int_winner_id;
 	// Encrypted copy of this message's payload - see security.h
-	// len_cipher == 0 means encryption is not in use (fall back to the
-	// plaintext fields above); arr_cipher size must match
-	// SECURITY_CIPHERTEXT_LEN in security.h
+	// Samples with len_cipher == 0 or a cipher that fails to decrypt are
+	// dropped; arr_cipher size must match SECURITY_CIPHERTEXT_LEN in
+	// security.h
 	octet arr_cipher[64];
 	unsigned long len_cipher;
 };
@@ -94,9 +95,9 @@ struct Position
 	long int_x;
 	long int_y;
 	// Encrypted copy of this message's payload - see security.h
-	// len_cipher == 0 means encryption is not in use (fall back to the
-	// plaintext fields above); arr_cipher size must match
-	// SECURITY_CIPHERTEXT_LEN in security.h
+	// Samples with len_cipher == 0 or a cipher that fails to decrypt are
+	// dropped; arr_cipher size must match SECURITY_CIPHERTEXT_LEN in
+	// security.h
 	octet arr_cipher[64];
 	unsigned long len_cipher;
 };

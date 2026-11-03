@@ -542,27 +542,25 @@ static void publish_input(dds_entity_t a_writer, int a_int_player_id,
 	input.int_player_id = a_int_player_id;
 	input.ch_direction = a_ch_direction;
 
-	// Encrypt the payload before publishing - see security.h. len_cipher
-	// stays 0 (plaintext fields are used as a fallback) if encryption is
-	// ever unavailable
+	// Encrypt the payload before publishing - see security.h. The server
+	// drops anything without a valid cipher, so skip sending if
+	// encryption fails
 	unsigned char arr_plain[sizeof(int) + sizeof(char)];
 	memcpy(arr_plain, &input.int_player_id, sizeof(int));
 	memcpy(arr_plain + sizeof(int), &input.ch_direction, sizeof(char));
 	size_t cipher_len = 0;
-	if (security_encrypt(arr_plain, sizeof(arr_plain),
-		input.arr_cipher, &cipher_len) &&
-		cipher_len <= sizeof(input.arr_cipher))
+	if (!security_encrypt(arr_plain, sizeof(arr_plain),
+		input.arr_cipher, &cipher_len) ||
+		cipher_len > sizeof(input.arr_cipher))
 	{
-		input.len_cipher = (unsigned long)cipher_len;
-		// Blank the plaintext copy, so the direction is only readable from
-		// the ciphertext. int_player_id stays in the clear - it is the DDS
-		// key this instance is routed/leave-detected by, not secret payload
-		input.ch_direction = 'n';
+		fprintf(stderr, "Input not sent: encryption failed\n");
+		return;
 	}
-	else
-	{
-		input.len_cipher = 0;
-	}
+	input.len_cipher = (unsigned long)cipher_len;
+	// Blank the plaintext copy, so the direction is only readable from
+	// the ciphertext. int_player_id stays in the clear - it is the DDS
+	// key this instance is routed/leave-detected by, not secret payload
+	input.ch_direction = 'n';
 
 	dds_return_t rc = dds_write(a_writer, &input);
 	if (rc != DDS_RETCODE_OK)
@@ -688,12 +686,18 @@ void *worker(void *arg)
         NULL
     );
     
+	// No autodispose, so deleting this writer when we leave unregisters our
+	// Input instance (not-alive-no-writers) instead of disposing it - the
+	// server ignores disposes, since any participant could send one (server.c)
+	dds_qos_t *qos_input = dds_create_qos();
+	dds_qset_writer_data_lifecycle(qos_input, false);
 	input_writer = dds_create_writer(
         participant,
         input_topic,
-        NULL,
+        qos_input,
         NULL
     );
+	dds_delete_qos(qos_input);
     
 	/* ----------------------------------------------------- */
     /* Create readers                                         */
@@ -746,8 +750,10 @@ void *worker(void *arg)
 	// in the process ID keeps clients started in the same second apart
 	srand((unsigned int)time(NULL) ^ (unsigned int)getpid());
 	request.int_nonce = rand();
-	// Fill the authentication credential - see security.h
-	security_make_client_token(request.arr_token, sizeof(request.arr_token));
+	// Fill the authentication credential, bound to this request's nonce -
+	// see security.h
+	security_make_client_token(request.int_nonce, request.arr_token,
+		sizeof(request.arr_token));
     
 	/* Initialize sample buffer, by pointing the void pointer within
 	* the buffer array to a valid sample memory location. */
@@ -795,19 +801,19 @@ void *worker(void *arg)
 				// Authenticate the response - see security.h. The server
 				// already verified us via JoinRequest.arr_token; this lets
 				// us verify the response really came from a holder of the
-				// shared key too, rather than trusting it outright
-				if (response->len_cipher > 0)
+				// shared key too, rather than trusting it outright. An
+				// unencrypted response is dropped, never trusted
+				unsigned char arr_plain[sizeof(int) * 2];
+				size_t plain_len = 0;
+				if (response->len_cipher == 0 ||
+					!security_decrypt(response->arr_cipher, response->len_cipher,
+					arr_plain, sizeof(arr_plain), &plain_len) ||
+					plain_len != sizeof(arr_plain))
 				{
-					unsigned char arr_plain[sizeof(int) * 2];
-					size_t plain_len = 0;
-					if (!security_decrypt(response->arr_cipher, response->len_cipher,
-						arr_plain, &plain_len) || plain_len != sizeof(arr_plain))
-					{
-						continue;
-					}
-					memcpy(&int_resp_player_id, arr_plain, sizeof(int));
-					memcpy(&int_resp_nonce, arr_plain + sizeof(int), sizeof(int));
+					continue;
 				}
+				memcpy(&int_resp_player_id, arr_plain, sizeof(int));
+				memcpy(&int_resp_nonce, arr_plain + sizeof(int), sizeof(int));
 
 				// Responses are broadcast: ignore the ones meant for other clients
 				if (int_resp_nonce != request.int_nonce)
@@ -902,21 +908,20 @@ void *worker(void *arg)
 			int int_cell_y = claim->int_cell_y;
 			int int_owner_id = claim->int_owner_id;
 
-			// Decrypt the payload if the server sent one - see security.h
-			// A message that fails authentication is dropped
-			if (claim->len_cipher > 0)
+			// Decrypt the payload - see security.h. A message that is
+			// unencrypted or fails authentication is dropped
+			unsigned char arr_plain[sizeof(int) * 3];
+			size_t plain_len = 0;
+			if (claim->len_cipher == 0 ||
+				!security_decrypt(claim->arr_cipher, claim->len_cipher,
+				arr_plain, sizeof(arr_plain), &plain_len) ||
+				plain_len != sizeof(arr_plain))
 			{
-				unsigned char arr_plain[SECURITY_CIPHERTEXT_LEN];
-				size_t plain_len = 0;
-				if (!security_decrypt(claim->arr_cipher, claim->len_cipher,
-					arr_plain, &plain_len) || plain_len != sizeof(int) * 3)
-				{
-					continue;
-				}
-				memcpy(&int_cell_x, arr_plain, sizeof(int));
-				memcpy(&int_cell_y, arr_plain + sizeof(int), sizeof(int));
-				memcpy(&int_owner_id, arr_plain + sizeof(int) * 2, sizeof(int));
+				continue;
 			}
+			memcpy(&int_cell_x, arr_plain, sizeof(int));
+			memcpy(&int_cell_y, arr_plain + sizeof(int), sizeof(int));
+			memcpy(&int_owner_id, arr_plain + sizeof(int) * 2, sizeof(int));
 
 			// Player IDs are 1..MAX_PLAYERS, 0 = unclaimed
 			if (int_owner_id < 0 || int_owner_id > MAX_PLAYERS)
@@ -941,22 +946,21 @@ void *worker(void *arg)
 			int int_state_over = state->b_game_over;
 			int int_state_winner = state->int_winner_id;
 
-			// Decrypt the payload if the server sent one - see security.h
-			// A message that fails authentication is dropped
-			if (state->len_cipher > 0)
+			// Decrypt the payload - see security.h. A message that is
+			// unencrypted or fails authentication is dropped
+			unsigned char arr_plain[sizeof(int) * 4];
+			size_t plain_len = 0;
+			if (state->len_cipher == 0 ||
+				!security_decrypt(state->arr_cipher, state->len_cipher,
+				arr_plain, sizeof(arr_plain), &plain_len) ||
+				plain_len != sizeof(arr_plain))
 			{
-				unsigned char arr_plain[SECURITY_CIPHERTEXT_LEN];
-				size_t plain_len = 0;
-				if (!security_decrypt(state->arr_cipher, state->len_cipher,
-					arr_plain, &plain_len) || plain_len != sizeof(int) * 4)
-				{
-					continue;
-				}
-				memcpy(&int_state_secs, arr_plain, sizeof(int));
-				memcpy(&int_state_started, arr_plain + sizeof(int), sizeof(int));
-				memcpy(&int_state_over, arr_plain + sizeof(int) * 2, sizeof(int));
-				memcpy(&int_state_winner, arr_plain + sizeof(int) * 3, sizeof(int));
+				continue;
 			}
+			memcpy(&int_state_secs, arr_plain, sizeof(int));
+			memcpy(&int_state_started, arr_plain + sizeof(int), sizeof(int));
+			memcpy(&int_state_over, arr_plain + sizeof(int) * 2, sizeof(int));
+			memcpy(&int_state_winner, arr_plain + sizeof(int) * 3, sizeof(int));
 
 			pthread_mutex_lock(&mutex);
 			int_seconds_left = int_state_secs;
@@ -978,9 +982,11 @@ void *worker(void *arg)
 		{
 			if (!infos_position[0].valid_data)
 			{
-				// A disposed Position instance means the server dropped that
-				// player (they left), so stop drawing their square
-				if (infos_position[0].instance_state != DDS_ALIVE_INSTANCE_STATE)
+				// A no-writers Position instance means the server unregistered
+				// that player (they left), so stop drawing their square. A
+				// disposed instance is ignored: any DDS participant can
+				// dispose one, which would let it hide another player
+				if (infos_position[0].instance_state == DDS_NOT_ALIVE_NO_WRITERS_INSTANCE_STATE)
 				{
 					int int_left_id = ((Position *) samples_position[0])->int_player_id;
 					if (int_left_id >= 1 && int_left_id <= MAX_PLAYERS)
@@ -1007,20 +1013,25 @@ void *worker(void *arg)
 			int int_position_x = position->int_x;
 			int int_position_y = position->int_y;
 
-			// Decrypt the payload if the server sent one - see security.h
-			// Falls back to the plaintext fields above until
-			// security_decrypt() is implemented (len_cipher will be 0)
-			if (position->len_cipher > 0)
+			// Decrypt the payload - see security.h. A message that is
+			// unencrypted or fails authentication is dropped, never read
+			// from the plaintext fields above
+			unsigned char arr_plain[sizeof(int) * 2];
+			size_t plain_len = 0;
+			if (position->len_cipher == 0 ||
+				!security_decrypt(position->arr_cipher, position->len_cipher,
+				arr_plain, sizeof(arr_plain), &plain_len) ||
+				plain_len != sizeof(arr_plain))
 			{
-				unsigned char arr_plain[sizeof(int) * 2];
-				size_t plain_len = 0;
-				if (security_decrypt(position->arr_cipher, position->len_cipher,
-					arr_plain, &plain_len) && plain_len == sizeof(arr_plain))
-				{
-					memcpy(&int_position_x, arr_plain, sizeof(int));
-					memcpy(&int_position_y, arr_plain + sizeof(int), sizeof(int));
-				}
+				continue;
 			}
+			memcpy(&int_position_x, arr_plain, sizeof(int));
+			memcpy(&int_position_y, arr_plain + sizeof(int), sizeof(int));
+
+			// The player ID is the plaintext DDS key and indexes arr_Players,
+			// so reject anything out of range
+			if (int_position_player_id < 1 || int_position_player_id > MAX_PLAYERS)
+				continue;
 
 			pthread_mutex_lock(&mutex);
 			// Set this player to active

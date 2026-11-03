@@ -91,25 +91,23 @@ static void publish_cell_claimed(dds_entity_t a_writer, int a_int_col,
 	claim.int_cell_y = a_int_row;
 	claim.int_owner_id = a_int_owner_id;
 
-	// Encrypt the payload before publishing - see security.h. len_cipher
-	// stays 0 (plaintext fields are used as a fallback) if encryption is
-	// ever unavailable
+	// Encrypt the payload before publishing - see security.h. Clients drop
+	// anything without a valid cipher, so if encryption ever fails there is
+	// no point sending (and leaking) the plaintext
 	int arr_plain[3] = { a_int_col, a_int_row, a_int_owner_id };
 	size_t cipher_len = 0;
-	if (security_encrypt((unsigned char *)arr_plain, sizeof(arr_plain),
-		claim.arr_cipher, &cipher_len) &&
-		cipher_len <= sizeof(claim.arr_cipher))
+	if (!security_encrypt((unsigned char *)arr_plain, sizeof(arr_plain),
+		claim.arr_cipher, &cipher_len) ||
+		cipher_len > sizeof(claim.arr_cipher))
 	{
-		claim.len_cipher = (unsigned long)cipher_len;
-		// Blank the plaintext owner, so it is only readable from the
-		// ciphertext. int_cell_x/y stay in the clear - they are the DDS
-		// key this instance is routed by, not secret payload
-		claim.int_owner_id = GRID_UNCLAIMED;
+		fprintf(stderr, "CellClaimed not sent: encryption failed\n");
+		return;
 	}
-	else
-	{
-		claim.len_cipher = 0;
-	}
+	claim.len_cipher = (unsigned long)cipher_len;
+	// Blank the plaintext owner, so it is only readable from the
+	// ciphertext. int_cell_x/y stay in the clear - they are the DDS
+	// key this instance is routed by, not secret payload
+	claim.int_owner_id = GRID_UNCLAIMED;
 
 	dds_return_t rc = dds_write(a_writer, &claim);
 	if (rc != DDS_RETCODE_OK)
@@ -128,26 +126,25 @@ static void publish_game_state(dds_entity_t a_writer, int a_int_seconds_left,
 	state.b_game_over = a_b_game_over;
 	state.int_winner_id = a_int_winner_id;
 
-	// Encrypt the payload before publishing - see security.h
+	// Encrypt the payload before publishing - see security.h. Clients drop
+	// anything without a valid cipher, so skip sending if encryption fails
 	int arr_plain[4] = { a_int_seconds_left, a_b_started, a_b_game_over,
 		a_int_winner_id };
 	size_t cipher_len = 0;
-	if (security_encrypt((unsigned char *)arr_plain, sizeof(arr_plain),
-		state.arr_cipher, &cipher_len) &&
-		cipher_len <= sizeof(state.arr_cipher))
+	if (!security_encrypt((unsigned char *)arr_plain, sizeof(arr_plain),
+		state.arr_cipher, &cipher_len) ||
+		cipher_len > sizeof(state.arr_cipher))
 	{
-		state.len_cipher = (unsigned long)cipher_len;
-		// GameState has no DDS key, so every field here is payload -
-		// blank all of them; it is only readable from the ciphertext
-		state.int_seconds_left = 0;
-		state.b_started = false;
-		state.b_game_over = false;
-		state.int_winner_id = 0;
+		fprintf(stderr, "GameState not sent: encryption failed\n");
+		return;
 	}
-	else
-	{
-		state.len_cipher = 0;
-	}
+	state.len_cipher = (unsigned long)cipher_len;
+	// GameState has no DDS key, so every field here is payload -
+	// blank all of them; it is only readable from the ciphertext
+	state.int_seconds_left = 0;
+	state.b_started = false;
+	state.b_game_over = false;
+	state.int_winner_id = 0;
 
 	dds_return_t rc = dds_write(a_writer, &state);
 	if (rc != DDS_RETCODE_OK)
@@ -157,7 +154,7 @@ static void publish_game_state(dds_entity_t a_writer, int a_int_seconds_left,
 }
 
 // Frees a departed player's slot: marks them inactive, releases their cells
-// back to unclaimed, and disposes their Position instance so every client
+// back to unclaimed, and unregisters their Position instance so every client
 // stops drawing their square. The freed slot can then be taken by a new
 // player through the normal join flow
 static void handle_player_left(int a_int_player_id, Grid *a_grid,
@@ -193,15 +190,17 @@ static void handle_player_left(int a_int_player_id, Grid *a_grid,
 		}
 	}
 
-	// Disposing the keyed Position instance tells every client to drop this
-	// player's square
+	// Unregistering the keyed Position instance tells every client to drop
+	// this player's square: with no writer left, it goes not-alive-no-writers.
+	// Unregister rather than dispose, because any DDS participant can dispose
+	// an instance, so clients only trust the no-writers state (see client.c)
 	Position position;
 	memset(&position, 0, sizeof(position));
 	position.int_player_id = a_int_player_id;
-	dds_return_t rc = dds_dispose(a_position_writer, &position);
+	dds_return_t rc = dds_unregister_instance(a_position_writer, &position);
 	if (rc != DDS_RETCODE_OK)
 	{
-		DDS_FATAL("dds_dispose: %s\n", dds_strretcode(-rc));
+		DDS_FATAL("dds_unregister_instance: %s\n", dds_strretcode(-rc));
 	}
 
 	printf("Player %d left\n", a_int_player_id);
@@ -339,9 +338,13 @@ void *worker(void *arg)
     );
     
 	// Reliable, so a Position update is never silently dropped and left
-	// trailing behind the (already-reliable) CellClaimed for the same move
+	// trailing behind the (already-reliable) CellClaimed for the same move.
+	// No autodispose, so unregistering a departed player's instance leaves
+	// it not-alive-no-writers rather than disposed - clients ignore
+	// disposes, since any participant could send one (client.c)
 	dds_qos_t *qos_position = dds_create_qos();
 	dds_qset_reliability(qos_position, DDS_RELIABILITY_RELIABLE, DDS_SECS(1));
+	dds_qset_writer_data_lifecycle(qos_position, false);
 	position_writer = dds_create_writer(
         participant,
         position_topic,
@@ -413,7 +416,7 @@ void *worker(void *arg)
 			JoinRequest *join_req = (JoinRequest *) samples_join[0];
 			// Authenticate the client before admitting it - see security.h
 				// (a required security feature, Slide 14)
-			if (security_verify_client_token(join_req->arr_token))
+			if (security_verify_client_token(join_req->int_nonce, join_req->arr_token))
 			{
 				printf("Join request received (authenticated)\n");
 				// Signal the main thread to check if
@@ -459,18 +462,19 @@ void *worker(void *arg)
 				// authentic/readable via the ciphertext
 				response.int_player_id = 0;
 				response.int_nonce = 0;
+
+				rc = dds_write(response_writer, &response);
+				if (rc != DDS_RETCODE_OK)
+				{
+					DDS_FATAL("dds_write: %s\n", dds_strretcode(-rc));
+				}
+				printf("Join response sent\n");
 			}
 			else
 			{
-				response.len_cipher = 0;
+				// Clients drop unencrypted responses, so don't send one
+				fprintf(stderr, "Join response not sent: encryption failed\n");
 			}
-
-			rc = dds_write(response_writer, &response);
-			if (rc != DDS_RETCODE_OK)
-			{
-				DDS_FATAL("dds_write: %s\n", dds_strretcode(-rc));
-			}
-			printf("Join response sent\n");
 			/* Polling sleep. */
 			dds_sleepfor (DDS_MSECS (20));
 		}
@@ -497,8 +501,8 @@ void *worker(void *arg)
 					position.int_y = arr_Players[i].y;
 
 					// Encrypt the payload before publishing - see security.h.
-					// len_cipher stays 0 (plaintext fields are used as a
-					// fallback) if encryption is ever unavailable
+					// Clients drop anything without a valid cipher, so skip
+					// sending if encryption fails
 					int arr_plain[2] = { position.int_x, position.int_y };
 					size_t cipher_len = 0;
 					if (security_encrypt((unsigned char *)arr_plain, sizeof(arr_plain),
@@ -512,18 +516,18 @@ void *worker(void *arg)
 						// routed/leave-detected by, not secret payload
 						position.int_x = 0;
 						position.int_y = 0;
+
+						rc = dds_write(position_writer, &position);
+						if (rc != DDS_RETCODE_OK)
+						{
+							DDS_FATAL("dds_write: %s\n", dds_strretcode(-rc));
+						}
+						// printf("Position sent\n");
 					}
 					else
 					{
-						position.len_cipher = 0;
+						fprintf(stderr, "Position not sent: encryption failed\n");
 					}
-
-					rc = dds_write(position_writer, &position);
-					if (rc != DDS_RETCODE_OK)
-					{
-						DDS_FATAL("dds_write: %s\n", dds_strretcode(-rc));
-					}
-					// printf("Position sent\n");
 
 					// Claim the cell under this player while the round runs,
 					// and tell the clients if it changed hands
@@ -638,9 +642,11 @@ void *worker(void *arg)
 		{
 			if (!infos_input[0].valid_data)
 			{
-				// A not-alive Input instance means that client's DDS writer is
-				// gone (window closed, or the process died), so free their slot
-				if (infos_input[0].instance_state != DDS_ALIVE_INSTANCE_STATE)
+				// A no-writers Input instance means that client's DDS writer is
+				// gone (window closed, or the process died), so free their slot.
+				// A disposed instance is ignored: any DDS participant can
+				// dispose another player's instance, which would let it kick them
+				if (infos_input[0].instance_state == DDS_NOT_ALIVE_NO_WRITERS_INSTANCE_STATE)
 				{
 					handle_player_left(((Input *) samples_input[0])->int_player_id,
 						&grid, cell_writer, position_writer);
@@ -656,20 +662,20 @@ void *worker(void *arg)
 			char ch_input_dir = input->ch_direction;
 			/* printf("%d=%c\n", int_input_player_id, ch_input_dir); */
 
-			// Decrypt the payload if the client sent one - see security.h
-			// Falls back to the plaintext fields above until
-			// security_decrypt() is implemented (len_cipher will be 0)
-			if (input->len_cipher > 0)
+			// Decrypt the payload - see security.h. Input without a valid
+			// cipher is dropped, never read from the plaintext fields above,
+			// or anyone on the DDS domain could move any player without the key
+			unsigned char arr_plain[sizeof(int) + sizeof(char)];
+			size_t plain_len = 0;
+			if (input->len_cipher == 0 ||
+				!security_decrypt(input->arr_cipher, input->len_cipher,
+				arr_plain, sizeof(arr_plain), &plain_len) ||
+				plain_len != sizeof(arr_plain))
 			{
-				unsigned char arr_plain[sizeof(int) + sizeof(char)];
-				size_t plain_len = 0;
-				if (security_decrypt(input->arr_cipher, input->len_cipher,
-					arr_plain, &plain_len) && plain_len == sizeof(arr_plain))
-				{
-					memcpy(&int_input_player_id, arr_plain, sizeof(int));
-					memcpy(&ch_input_dir, arr_plain + sizeof(int), sizeof(char));
-				}
+				continue;
 			}
+			memcpy(&int_input_player_id, arr_plain, sizeof(int));
+			memcpy(&ch_input_dir, arr_plain + sizeof(int), sizeof(char));
             
 			// Ignore input from an unknown player ID, since it indexes arr_Players
 			if (int_input_player_id < 1 || int_input_player_id > MAX_PLAYERS)

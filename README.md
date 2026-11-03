@@ -56,14 +56,24 @@ by hand.)
 - **`security.h`** is the shared auth/encryption API, same deal - see its
   header comments for the API, and `security.c`'s header comment for the
   pre-shared-key scheme (two 32-byte secrets compiled into both client and
-  server: one for `JoinRequest` authentication, one for AES-256-GCM). Once
-  a message is encrypted, its plaintext fields are blanked (except the DDS
-  key field, eg `Position.int_player_id`, which has to stay in the clear
-  for routing) so the real data is only readable from the ciphertext.
+  server: one for `JoinRequest` authentication, one for AES-256-GCM). The
+  join credential is an HMAC of the request's nonce, so the auth key itself
+  is never sent. Once a message is encrypted, its plaintext fields are
+  blanked (except the DDS key field, eg `Position.int_player_id`, which has
+  to stay in the clear for routing) so the real data is only readable from
+  the ciphertext. Receivers drop any message that is unencrypted or fails
+  to decrypt - there is no plaintext fallback.
+- **Keys**: `CSD3116_AUTH_PSK` and `CSD3116_AES_KEY` (64 hex characters
+  each) override the built-in keys; server and every client must use the
+  same values. A malformed value makes the program exit instead of falling
+  back to the built-in key. Generate one with `openssl rand -hex 32`.
 - **Message flow**: client sends `JoinRequest` (with a credential) → server
   verifies it and assigns a player ID → client sends `Input` on keypress →
   server applies the move (collision-checked) and broadcasts `Position` to
-  every client.
+  every client. A player leaves when their `Input` instance has no writers
+  left (their client shut down DDS); the server then unregisters their
+  `Position` instance. Disposed instances are ignored, since any DDS
+  participant could dispose another player's instance to kick them.
 - **Threading**: server and client each run a DDS worker thread (networking)
   alongside their main thread (game-state / rendering). Details are in the
   comments at the top of each file.
