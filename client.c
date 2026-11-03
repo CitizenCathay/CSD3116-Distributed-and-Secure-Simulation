@@ -542,9 +542,9 @@ static void publish_input(dds_entity_t a_writer, int a_int_player_id,
 	input.int_player_id = a_int_player_id;
 	input.ch_direction = a_ch_direction;
 
-	// Encrypt the payload before publishing - see security.h
-	// len_cipher stays 0 (plaintext fields above are used instead) until
-	// security_encrypt() is implemented
+	// Encrypt the payload before publishing - see security.h. len_cipher
+	// stays 0 (plaintext fields are used as a fallback) if encryption is
+	// ever unavailable
 	unsigned char arr_plain[sizeof(int) + sizeof(char)];
 	memcpy(arr_plain, &input.int_player_id, sizeof(int));
 	memcpy(arr_plain + sizeof(int), &input.ch_direction, sizeof(char));
@@ -554,6 +554,10 @@ static void publish_input(dds_entity_t a_writer, int a_int_player_id,
 		cipher_len <= sizeof(input.arr_cipher))
 	{
 		input.len_cipher = (unsigned long)cipher_len;
+		// Blank the plaintext copy, so the direction is only readable from
+		// the ciphertext. int_player_id stays in the clear - it is the DDS
+		// key this instance is routed/leave-detected by, not secret payload
+		input.ch_direction = 'n';
 	}
 	else
 	{

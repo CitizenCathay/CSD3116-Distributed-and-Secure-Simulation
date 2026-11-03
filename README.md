@@ -5,11 +5,11 @@ the Week 1 Team Lab baseline (`CSD3116 _ Week 01 _ Team Lab _ V0.2.pdf`).
 
 ## Quick start
 
-Needs WSL (or macOS - see the spec PDF) with GLFW, OpenGL and Cyclone DDS dev
-packages installed:
+Needs WSL (or macOS - see the spec PDF) with GLFW, OpenGL, Cyclone DDS and
+OpenSSL dev packages installed:
 
 ```bash
-sudo apt install libgl1-mesa-dev libglfw3-dev cyclonedds-dev cyclonedds-tools pkg-config
+sudo apt install libgl1-mesa-dev libglfw3-dev cyclonedds-dev cyclonedds-tools libssl-dev pkg-config
 ```
 
 Then:
@@ -40,7 +40,7 @@ by hand.)
 | `client.c` | DDS client - one per player, renders the game and sends input |
 | `game_logic.h`, `game_logic.c` | Pure game-rule logic (collision, spawn, movement) - no DDS/GLFW, unit-tested |
 | `grid_logic.h`, `grid_logic.c` | Pure "color the floor" rules (cell claiming, scores, winner, round timer) - no DDS/GLFW, unit-tested |
-| `security.h`, `security.c` | Auth + DDS-encryption hooks - wired into server/client, bodies still TODO stubs |
+| `security.h`, `security.c` | Pre-shared-key client auth + AES-256-GCM DDS-payload encryption (OpenSSL EVP), wired into server/client |
 | `stb_easy_font.h` | Vendored third-party font renderer (draws player labels) |
 | `test_security.c`, `test_game_logic.c`, `test_grid_logic.c` | Unit tests - build with plain `gcc`, no other deps |
 | `Makefile` | `make`, `make test`, `make clean` |
@@ -54,8 +54,12 @@ by hand.)
   `game_find_free_slot()`, `game_random_spawn()`. See the header comments
   there for exactly what each function does.
 - **`security.h`** is the shared auth/encryption API, same deal - see its
-  header comments for the API and `README`'s "Not yet implemented" below for
-  what's still a stub.
+  header comments for the API, and `security.c`'s header comment for the
+  pre-shared-key scheme (two 32-byte secrets compiled into both client and
+  server: one for `JoinRequest` authentication, one for AES-256-GCM). Once
+  a message is encrypted, its plaintext fields are blanked (except the DDS
+  key field, eg `Position.int_player_id`, which has to stay in the clear
+  for routing) so the real data is only readable from the ciphertext.
 - **Message flow**: client sends `JoinRequest` (with a credential) → server
   verifies it and assigns a player ID → client sends `Input` on keypress →
   server applies the move (collision-checked) and broadcasts `Position` to
@@ -66,7 +70,7 @@ by hand.)
 
 ## Not yet implemented
 
-- `security.c` bodies (auth currently always accepts; encrypt/decrypt are
-  stubbed out and fall back to plaintext)
-- Code optimization pass
-- "Should improve" items, e.g. supporting client leave/disconnect
+- Code optimization pass (with profiler validation for the slides)
+- Real key provisioning for `security.c`'s pre-shared secrets - they're
+  currently hardcoded in source, which is fine for a course demo but is
+  explicitly not how a real deployment would manage keys (see `security.c`)

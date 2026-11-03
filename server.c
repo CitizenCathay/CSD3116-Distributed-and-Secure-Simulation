@@ -91,9 +91,9 @@ static void publish_cell_claimed(dds_entity_t a_writer, int a_int_col,
 	claim.int_cell_y = a_int_row;
 	claim.int_owner_id = a_int_owner_id;
 
-	// Encrypt the payload before publishing - see security.h
-	// len_cipher stays 0 (plaintext fields above are used instead) if
-	// encryption is not available
+	// Encrypt the payload before publishing - see security.h. len_cipher
+	// stays 0 (plaintext fields are used as a fallback) if encryption is
+	// ever unavailable
 	int arr_plain[3] = { a_int_col, a_int_row, a_int_owner_id };
 	size_t cipher_len = 0;
 	if (security_encrypt((unsigned char *)arr_plain, sizeof(arr_plain),
@@ -101,6 +101,10 @@ static void publish_cell_claimed(dds_entity_t a_writer, int a_int_col,
 		cipher_len <= sizeof(claim.arr_cipher))
 	{
 		claim.len_cipher = (unsigned long)cipher_len;
+		// Blank the plaintext owner, so it is only readable from the
+		// ciphertext. int_cell_x/y stay in the clear - they are the DDS
+		// key this instance is routed by, not secret payload
+		claim.int_owner_id = GRID_UNCLAIMED;
 	}
 	else
 	{
@@ -133,6 +137,12 @@ static void publish_game_state(dds_entity_t a_writer, int a_int_seconds_left,
 		cipher_len <= sizeof(state.arr_cipher))
 	{
 		state.len_cipher = (unsigned long)cipher_len;
+		// GameState has no DDS key, so every field here is payload -
+		// blank all of them; it is only readable from the ciphertext
+		state.int_seconds_left = 0;
+		state.b_started = false;
+		state.b_game_over = false;
+		state.int_winner_id = 0;
 	}
 	else
 	{
@@ -466,9 +476,9 @@ void *worker(void *arg)
 					position.int_x = arr_Players[i].x;
 					position.int_y = arr_Players[i].y;
 
-					// Encrypt the payload before publishing - see security.h
-					// len_cipher stays 0 (plaintext fields above are used
-					// instead) until security_encrypt() is implemented
+					// Encrypt the payload before publishing - see security.h.
+					// len_cipher stays 0 (plaintext fields are used as a
+					// fallback) if encryption is ever unavailable
 					int arr_plain[2] = { position.int_x, position.int_y };
 					size_t cipher_len = 0;
 					if (security_encrypt((unsigned char *)arr_plain, sizeof(arr_plain),
@@ -476,6 +486,12 @@ void *worker(void *arg)
 						cipher_len <= sizeof(position.arr_cipher))
 					{
 						position.len_cipher = (unsigned long)cipher_len;
+						// Blank the plaintext coords, so position is only
+						// readable from the ciphertext. int_player_id stays
+						// in the clear - it is the DDS key this instance is
+						// routed/leave-detected by, not secret payload
+						position.int_x = 0;
+						position.int_y = 0;
 					}
 					else
 					{
