@@ -14,7 +14,10 @@ LIBS_GLFW     := $(shell pkg-config --libs glfw3)
 CFLAGS_CRYPTO := $(shell pkg-config --cflags libcrypto 2>/dev/null)
 LIBS_CRYPTO   := $(shell pkg-config --libs libcrypto 2>/dev/null || echo -lcrypto)
 
-.PHONY: all test clean
+# Headless DDS tools for benchmarking and integration checks (see tools/)
+TOOLS := tools/bench tools/join_test tools/late_joiner
+
+.PHONY: all test clean tools integration bench
 
 all: server client
 
@@ -45,5 +48,23 @@ test: test_security test_game_logic test_grid_logic
 	./test_game_logic
 	./test_grid_logic
 
+tools: $(TOOLS)
+
+tools/%: tools/%.c security.c messages.c messages.h
+	$(CC) $(CFLAGS) -I. $< security.c messages.c -o $@ \
+		$(CFLAGS_DDS) $(LIBS_DDS) $(CFLAGS_CRYPTO) $(LIBS_CRYPTO)
+
+# Join/replay/late-joiner/shutdown checks against the real server (~1 min)
+integration: server tools
+	bash tools/integration.sh
+
+# Before/after benchmark: builds the pre-optimization commit and the current
+# code side by side in build/, then measures both
+bench:
+	bash tools/build_versions.sh
+	bash tools/compare.sh
+
 clean:
 	rm -f server client test_security test_game_logic test_grid_logic messages.h messages.c
+	rm -f $(TOOLS)
+	rm -rf build

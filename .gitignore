@@ -11,6 +11,11 @@ test_security
 test_game_logic
 test_grid_logic
 *.o
+tools/bench
+tools/join_test
+tools/late_joiner
+# Side-by-side old/new builds from tools/build_versions.sh
+build/
 
 # Run logs from manual testing
 *.log
