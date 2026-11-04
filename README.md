@@ -180,6 +180,20 @@ Plain C with a small `TEST_ASSERT` macro, no test framework. No DDS, GLFW or
 
 Each suite prints how many checks passed and exits non-zero on any failure.
 
+### Integration checks and benchmarks (`tools/`)
+
+Headless DDS clients that run against the real server, no windows needed:
+
+| Command | What it does |
+|---|---|
+| `make integration` | ~1 min of PASS/FAIL checks: repeated joins get the same slot, silent slots are freed, replayed input is ignored, late joiners see the right players, Ctrl+C shuts the server down cleanly |
+| `make bench` | Builds the pre-optimization commit and the current code side by side in `build/`, then measures both (latency, CPU per thread) |
+| `bash tools/load.sh build/new 20` | Puts a running server under a fixed load (4 idle players + 1 moving) for 20 s, eg while `perf record` or `strace -c` runs |
+
+To profile, build both versions with symbols (`bash tools/build_versions.sh`
+does this by default), start `build/old/server` or `build/new/server` under
+the profiler, and drive it with `tools/load.sh` using the same build folder.
+
 ---
 
 ## Security

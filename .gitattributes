@@ -1,0 +1,8 @@
+# Keep every text file LF in every checkout, whatever the local Git
+# settings. Windows Git defaults to converting to CRLF, which breaks the
+# Makefile's recipes and shell scripts under WSL
+* text=auto eol=lf
+
+*.pdf binary
+*.png binary
+*.mp4 binary
