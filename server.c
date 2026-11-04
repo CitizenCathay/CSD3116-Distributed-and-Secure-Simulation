@@ -10,7 +10,8 @@
        positions and the grid of claimed cells), runs the round timer and
        publishes updates to the clients.
 *******************************************************************************/
-/* gcc -o server server.c security.c game_logic.c grid_logic.c messages.c $(pkg-config --cflags --libs CycloneDDS) */
+/* gcc -O2 -o server server.c security.c game_logic.c grid_logic.c messages.c $(pkg-config --cflags --libs CycloneDDS) $(pkg-config --cflags --libs libcrypto) -pthread
+(or just `make server`) */
 
 /* Dr Khoo Teck Ping
 27 Aug 2026
@@ -32,6 +33,7 @@ watch out for break out of loop */
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <signal.h>
 #include <unistd.h>
 #include <time.h>
 
@@ -89,8 +91,14 @@ typedef struct
 static PendingResponse arr_response_queue[JOIN_QUEUE_LEN];
 static int int_response_queue_len = 0;
 // Created by the worker thread before it can queue any join request, so it
-// always exists by the time the main thread triggers it
+// always exists by the time the main thread triggers it. 0 until then
 static dds_entity_t response_guard = 0;
+
+// Set when Ctrl+C / SIGTERM arrives, so both threads finish and the worker
+// deletes its DDS participant. That is what tells every client straight
+// away that the server has gone (instead of after DDS's 10 s lease), so
+// they can rejoin when it comes back. Guarded by mutex
+static bool b_quit = false;
 
 // Last position published for each slot, so a Position is only sent when
 // it changes rather than for every player every tick. Only touched by the
@@ -434,11 +442,15 @@ static void create_dds(ServerDds *a_dds)
 	dds_delete_qos(qos_position);
 
 	// CellClaimed is keyed per cell: transient-local + keep-last-1 lets a
-	// client that joins mid-round receive the current owner of every cell
+	// client that joins mid-round receive the current owner of every cell.
+	// No autodispose, like Position: when the server stops, every cell goes
+	// not-alive-no-writers, which clients trust (unlike a dispose, which
+	// any participant could send) and use to clear the old server's floor
 	dds_qos_t *qos_cell = dds_create_qos();
 	dds_qset_durability(qos_cell, DDS_DURABILITY_TRANSIENT_LOCAL);
 	dds_qset_reliability(qos_cell, DDS_RELIABILITY_RELIABLE, DDS_SECS(1));
 	dds_qset_history(qos_cell, DDS_HISTORY_KEEP_LAST, 1);
+	dds_qset_writer_data_lifecycle(qos_cell, false);
 	a_dds->cell_writer = dds_create_writer(a_dds->participant, cell_topic, qos_cell, NULL);
 	dds_delete_qos(qos_cell);
 
@@ -545,10 +557,28 @@ static void take_inputs(const ServerDds *a_dds, Round *a_round)
 			// gone (window closed, or the process died), so free their slot.
 			// A disposed instance is ignored: any DDS participant can
 			// dispose another player's instance, which would let it kick them
-			if (infos_input[0].instance_state == DDS_NOT_ALIVE_NO_WRITERS_INSTANCE_STATE)
+			int int_left_id = ((Input *) samples_input[0])->int_player_id;
+			if (infos_input[0].instance_state != DDS_NOT_ALIVE_NO_WRITERS_INSTANCE_STATE ||
+				int_left_id < 1 || int_left_id > MAX_PLAYERS)
+				continue;
+
+			// Only once this slot's player has sent its first Input: before
+			// that, the event can only be stale news about an earlier writer
+			// of the same player ID (eg a client rejoining after a server
+			// restart deletes its old Input writer, and that can arrive after
+			// its new JoinRequest has already won it the same slot). Once
+			// the player's own writer has written, the instance cannot lose
+			// all its writers unless that writer has gone too. A client that
+			// disappears before its first Input is freed by
+			// FIRST_INPUT_TIMEOUT_SECS instead
+			pthread_mutex_lock(&mutex);
+			bool b_heard_from = arr_Players[int_left_id - 1].b_active &&
+				arr_b_input_seen[int_left_id - 1];
+			pthread_mutex_unlock(&mutex);
+			if (b_heard_from)
 			{
-				handle_player_left(((Input *) samples_input[0])->int_player_id,
-					&a_round->grid, a_dds->cell_writer, a_dds->position_writer);
+				handle_player_left(int_left_id, &a_round->grid, a_dds->cell_writer,
+					a_dds->position_writer);
 			}
 			continue;
 		}
@@ -798,6 +828,12 @@ void *worker(void *arg)
 		bool b_guard_triggered;
 		dds_take_guardcondition(response_guard, &b_guard_triggered);
 
+		pthread_mutex_lock(&mutex);
+		bool b_quit_temp = b_quit;
+		pthread_mutex_unlock(&mutex);
+		if (b_quit_temp)
+			break;
+
 		take_join_requests(&dds);
 		send_join_responses(&dds);
 		take_inputs(&dds, &round);
@@ -805,6 +841,10 @@ void *worker(void *arg)
 		update_round(&dds, &round);
 		publish_changes(&dds, &round);
 	}
+
+	// Deleting the participant removes our writers, so every client sees
+	// the server's Position/CellClaimed instances lose their writer at once
+	dds_delete(dds.participant);
 	return NULL;
 }
 
@@ -876,6 +916,28 @@ static void admit_join(int a_int_nonce)
 	queue_join_response(int_slot + 1, a_int_nonce);
 }
 
+// Signal thread: waits for Ctrl+C / SIGTERM, then tells the other threads
+// to finish. The signals are blocked in every other thread, so they are
+// only ever delivered here, where it is safe to lock the mutex and signal
+// the condition variable (a normal signal handler could do neither)
+static void *wait_for_quit(void *arg)
+{
+	sigset_t *ptr_signals = (sigset_t *)arg;
+	int int_signal;
+	sigwait(ptr_signals, &int_signal);
+
+	pthread_mutex_lock(&mutex);
+	b_quit = true;
+	// Wake the main thread from its condition variable...
+	pthread_cond_signal(&cond_join_queued);
+	dds_entity_t guard = response_guard;
+	pthread_mutex_unlock(&mutex);
+	// ...and the worker from its waitset
+	if (guard > 0)
+		dds_set_guardcondition(guard, true);
+	return NULL;
+}
+
 // Entry point of the application
 int main(void)
 {
@@ -888,10 +950,21 @@ int main(void)
 		return 1;
 	}
 
+	// Block Ctrl+C / SIGTERM here, before any other thread exists, so every
+	// thread (ours and DDS's) inherits the block and only wait_for_quit()
+	// receives them
+	static sigset_t quit_signals;
+	sigemptyset(&quit_signals);
+	sigaddset(&quit_signals, SIGINT);
+	sigaddset(&quit_signals, SIGTERM);
+	pthread_sigmask(SIG_BLOCK, &quit_signals, NULL);
+
 	// The main thread keeps the game state (join handling) while this worker
 	// thread does the DDS traffic (Slide 12)
 	pthread_t thread;
-	if (pthread_create(&thread, NULL, worker, NULL) != 0)
+	pthread_t signal_thread;
+	if (pthread_create(&thread, NULL, worker, NULL) != 0 ||
+		pthread_create(&signal_thread, NULL, wait_for_quit, &quit_signals) != 0)
 	{
 		perror("pthread_create");
 		return 1;
@@ -900,11 +973,16 @@ int main(void)
 	printf("Waiting...\n");
 	while (1)
 	{
-		// Sleep until the worker queues a join request, rather than waking
-		// every millisecond to check for one
+		// Sleep until the worker queues a join request (or we are told to
+		// quit), rather than waking every millisecond to check for one
 		pthread_mutex_lock(&mutex);
-		while (int_join_queue_len == 0)
+		while (int_join_queue_len == 0 && !b_quit)
 			pthread_cond_wait(&cond_join_queued, &mutex);
+		if (b_quit)
+		{
+			pthread_mutex_unlock(&mutex);
+			break;
+		}
 
 		for (int i = 0; i < int_join_queue_len; i++)
 			admit_join(arr_join_queue[i]);
@@ -916,6 +994,11 @@ int main(void)
 		dds_set_guardcondition(guard, true);
 	}
 
-	security_cleanup(); // unreachable while the loop above has no exit
+	// Wait for the worker to delete its participant, so clients learn the
+	// server has gone, then shut down
+	pthread_join(thread, NULL);
+	pthread_join(signal_thread, NULL);
+	security_cleanup();
+	printf("Server stopped\n");
 	return 0;
 }

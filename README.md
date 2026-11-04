@@ -14,7 +14,7 @@ walk over. Built in C on Cyclone DDS, OpenGL/GLFW and OpenSSL.
 Tested on WSL (Ubuntu 24.04).
 
 ```bash
-sudo apt install libgl1-mesa-dev libglfw3-dev cyclonedds-dev cyclonedds-tools libssl-dev pkg-config
+sudo apt install build-essential libgl1-mesa-dev libglfw3-dev cyclonedds-dev cyclonedds-tools libssl-dev pkg-config
 make            # builds server + client (runs idlc for you)
 ./server        # terminal 1
 ./client        # terminal 2, 3, ... one per player
@@ -156,6 +156,10 @@ moves are frozen and every client shows the winner.
 2. The server sees the player's `Input` instance lose its writer.
 3. The server frees the slot, unclaims their cells and unregisters their `Position`.
 4. Other clients remove the square and show *"Player N left the game"*.
+
+If the **server** stops (Ctrl+C) or restarts, clients see it immediately,
+clear the old floor and rejoin by themselves once a server is back. If it
+crashes instead, they notice within about 10 s (DDS's liveliness timeout).
 
 ---
 
