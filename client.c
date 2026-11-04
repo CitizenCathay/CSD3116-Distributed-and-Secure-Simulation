@@ -174,10 +174,16 @@ typedef struct
 	dds_entity_t cell_reader;
 	dds_entity_t state_reader;
 	dds_entity_t join_writer;
+	dds_entity_t input_topic;
 	dds_entity_t input_writer;
 	// Wakes the worker when any reader has data, or the main thread
 	// triggers wake_guard
 	dds_entity_t waitset;
+
+	// Set by take_positions() when our own Position loses its writer: the
+	// server has stopped, restarted, or freed our slot. The worker then
+	// rejoins - see rejoin()
+	bool b_dropped_by_server;
 
 	// Sample buffers for dds_take(), allocated once
 	void *ptr_response_sample;
@@ -203,6 +209,21 @@ static dds_entity_t create_topic(dds_entity_t a_participant,
 	return topic;
 }
 
+// Creates the Input writer. No autodispose, so deleting it (when we leave or
+// rejoin) unregisters our Input instance (not-alive-no-writers) instead of
+// disposing it - the server ignores disposes, since any participant could
+// send one (server.c)
+static dds_entity_t create_input_writer(const ClientDds *a_dds)
+{
+	dds_qos_t *qos_input = dds_create_qos();
+	dds_qset_writer_data_lifecycle(qos_input, false);
+	dds_entity_t writer = dds_create_writer(a_dds->participant, a_dds->input_topic, qos_input, NULL);
+	dds_delete_qos(qos_input);
+	if (writer < 0)
+		DDS_FATAL("dds_create_writer(Input): %s\n", dds_strretcode(-writer));
+	return writer;
+}
+
 // Creates the participant, topics, readers, writers and waitset
 static void create_dds(ClientDds *a_dds)
 {
@@ -214,20 +235,13 @@ static void create_dds(ClientDds *a_dds)
 
 	dds_entity_t join_topic = create_topic(a_dds->participant, &JoinRequest_desc, "JoinRequest");
 	dds_entity_t response_topic = create_topic(a_dds->participant, &JoinResponse_desc, "JoinResponse");
-	dds_entity_t input_topic = create_topic(a_dds->participant, &Input_desc, "Input");
+	a_dds->input_topic = create_topic(a_dds->participant, &Input_desc, "Input");
 	dds_entity_t position_topic = create_topic(a_dds->participant, &Position_desc, "Position");
 	dds_entity_t cell_topic = create_topic(a_dds->participant, &CellClaimed_desc, "CellClaimed");
 	dds_entity_t state_topic = create_topic(a_dds->participant, &GameState_desc, "GameState");
 
 	a_dds->join_writer = dds_create_writer(a_dds->participant, join_topic, NULL, NULL);
-
-	// No autodispose, so deleting this writer when we leave unregisters our
-	// Input instance (not-alive-no-writers) instead of disposing it - the
-	// server ignores disposes, since any participant could send one (server.c)
-	dds_qos_t *qos_input = dds_create_qos();
-	dds_qset_writer_data_lifecycle(qos_input, false);
-	a_dds->input_writer = dds_create_writer(a_dds->participant, input_topic, qos_input, NULL);
-	dds_delete_qos(qos_input);
+	a_dds->input_writer = create_input_writer(a_dds);
 
 	a_dds->response_reader = dds_create_reader(a_dds->participant, response_topic, NULL, NULL);
 
@@ -357,9 +371,6 @@ static void take_cells(ClientDds *a_dds)
 
 	while ((rc = dds_take(a_dds->cell_reader, samples_cell, infos_cell, MAX_SAMPLES, MAX_SAMPLES)) > 0)
 	{
-		if (!infos_cell[0].valid_data)
-			continue;
-
 		CellClaimed *claim = (CellClaimed *) samples_cell[0];
 		int int_cell_x = claim->int_cell_x;
 		int int_cell_y = claim->int_cell_y;
@@ -369,6 +380,21 @@ static void take_cells(ClientDds *a_dds)
 		if (int_cell_x < 0 || int_cell_x >= GRID_COLS ||
 			int_cell_y < 0 || int_cell_y >= GRID_ROWS)
 			continue;
+
+		if (!infos_cell[0].valid_data)
+		{
+			// Only the server writes CellClaimed, so a cell losing its
+			// writer means the server has gone. Forget that server's
+			// claims: a restarted server starts with an empty floor and
+			// only publishes cells as they are claimed again
+			if (infos_cell[0].instance_state == DDS_NOT_ALIVE_NO_WRITERS_INSTANCE_STATE)
+			{
+				pthread_mutex_lock(&mutex);
+				grid_set_owner(&grid, int_cell_x, int_cell_y, GRID_UNCLAIMED);
+				pthread_mutex_unlock(&mutex);
+			}
+			continue;
+		}
 
 		// Decrypt the payload - see security.h. A message that is
 		// unencrypted, fails authentication, was made for another cell
@@ -463,21 +489,26 @@ static void take_positions(ClientDds *a_dds)
 		if (!infos_position[0].valid_data)
 		{
 			// A no-writers Position instance means the server unregistered
-			// that player (they left), so stop drawing their square. A
-			// disposed instance is ignored: any DDS participant can
-			// dispose one, which would let it hide another player
+			// that player (they left), or the server itself has gone, so
+			// stop drawing their square. A disposed instance is ignored:
+			// any DDS participant can dispose one, which would let it hide
+			// another player
 			if (infos_position[0].instance_state == DDS_NOT_ALIVE_NO_WRITERS_INSTANCE_STATE)
 			{
 				pthread_mutex_lock(&mutex);
 				bool b_was_active = arr_Players[int_position_player_id - 1].b_active;
 				arr_Players[int_position_player_id - 1].b_active = false;
+				bool b_ours = int_position_player_id == int_player_id;
 				// Announce it on screen, but only once and not for ourselves
-				if (b_was_active && int_position_player_id != int_player_id)
+				if (b_was_active && !b_ours)
 				{
 					push_leave_notice(int_position_player_id);
 					printf("Player %d left the game\n", int_position_player_id);
 				}
 				pthread_mutex_unlock(&mutex);
+				// Our own square: the server no longer has us in the game
+				if (b_ours)
+					a_dds->b_dropped_by_server = true;
 			}
 			continue;
 		}
@@ -517,6 +548,47 @@ static dds_duration_t at_least_zero(dds_duration_t a_value)
 	return a_value > 0 ? a_value : 0;
 }
 
+// Fills a_request with a fresh nonce and the authentication credential
+// bound to it - see security.h. The nonce tags the request, so only the
+// response to it is accepted, and the server binds our Input to it
+static void make_join_request(JoinRequest *a_request)
+{
+	memset(a_request, 0, sizeof(*a_request));
+	a_request->int_nonce = security_make_nonce();
+	security_make_client_token(a_request->int_nonce, a_request->arr_token,
+		sizeof(a_request->arr_token));
+}
+
+// The server has dropped us (it stopped, restarted, or freed our slot), so
+// start over as a new client and join again. Spectating clients never get
+// here: they have no Position of their own and keep retrying anyway
+static void rejoin(ClientDds *a_dds, JoinRequest *a_request)
+{
+	printf("Lost our place in the game - rejoining\n");
+
+	pthread_mutex_lock(&mutex);
+	int_player_id = -1;
+	b_spectating = false;
+	pthread_mutex_unlock(&mutex);
+
+	// A new nonce: the server refuses a departed player's old one
+	make_join_request(a_request);
+
+	// A new Input writer: deleting the old one unregisters the Input
+	// instance of our old player ID, so it is not left registered by us
+	// after that ID goes to someone else
+	dds_delete(a_dds->input_writer);
+	a_dds->input_writer = create_input_writer(a_dds);
+
+	// A restarted server is a new sender, so start its streams afresh
+	a_dds->response_guard = (SecurityReplayGuard){0};
+	a_dds->state_guard = (SecurityReplayGuard){0};
+	memset(a_dds->arr_position_guard, 0, sizeof(a_dds->arr_position_guard));
+	memset(a_dds->arr_cell_guard, 0, sizeof(a_dds->arr_cell_guard));
+
+	a_dds->b_dropped_by_server = false;
+}
+
 // DDS worker thread (Slide 12): sends the join request and the player's
 // input, and receives the join response and the server's updates. Keeping
 // this off the main thread means delayed DDS traffic never freezes the
@@ -529,13 +601,7 @@ void *worker(void *arg)
 	create_dds(&dds);
 
 	JoinRequest request;
-	memset(&request, 0, sizeof(request));
-	// Tag the request, so only the response to it is accepted, and so the
-	// server can bind our Input to it - see security.h
-	request.int_nonce = security_make_nonce();
-	// Fill the authentication credential, bound to this request's nonce
-	security_make_client_token(request.int_nonce, request.arr_token,
-		sizeof(request.arr_token));
+	make_join_request(&request);
 
 	// When the next JoinRequest is due (sent every second until answered),
 	// and the earliest a held arrow key may send its next move
@@ -614,6 +680,14 @@ void *worker(void *arg)
 		take_cells(&dds);
 		take_states(&dds);
 		take_positions(&dds);
+
+		if (dds.b_dropped_by_server)
+		{
+			rejoin(&dds, &request);
+			b_sent_hello = false;
+			// Ask straight away; repeats every second until a server answers
+			next_join_time = dds_time();
+		}
 	}
 
 	// Deleting the participant removes our writers, which is how the server
