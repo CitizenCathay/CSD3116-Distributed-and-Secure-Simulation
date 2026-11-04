@@ -243,6 +243,16 @@ void security_make_client_token(int a_int_nonce, char *out_token, size_t token_l
 	memcpy(out_token, arr_mac, copy_len);
 }
 
+int security_make_nonce(void)
+{
+	int int_nonce = 0;
+	// Practically never fails; fall back to rand() rather than a fixed value
+	// that every client would then share
+	if (RAND_bytes((unsigned char *)&int_nonce, sizeof(int_nonce)) != 1)
+		int_nonce = rand();
+	return int_nonce;
+}
+
 bool security_verify_client_token(int a_int_nonce, const char *token)
 {
 	unsigned char arr_expected[SECURITY_TOKEN_LEN];

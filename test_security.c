@@ -92,6 +92,22 @@ static void test_client_token_is_bound_to_nonce(void)
 		"different nonces should produce different tokens");
 }
 
+static void test_nonces_are_random(void)
+{
+	// Comes from the CSPRNG, so a run of nonces should not repeat (a clash
+	// among 8 random 32-bit values is a ~1 in 600 million chance)
+	int arr_nonce[8];
+	for (int i = 0; i < 8; i++)
+		arr_nonce[i] = security_make_nonce();
+
+	bool b_all_different = true;
+	for (int i = 0; i < 8; i++)
+		for (int j = i + 1; j < 8; j++)
+			if (arr_nonce[i] == arr_nonce[j])
+				b_all_different = false;
+	TEST_ASSERT(b_all_different, "security_make_nonce() should not repeat values");
+}
+
 static void test_encrypt_decrypt_round_trip(void)
 {
 	const unsigned char arr_plain[] = "hello";
@@ -424,6 +440,7 @@ int main(void)
 	test_make_client_token_is_accepted();
 	test_verify_client_token_rejects_wrong_token();
 	test_client_token_is_bound_to_nonce();
+	test_nonces_are_random();
 	test_encrypt_decrypt_round_trip();
 	test_encrypt_is_randomized();
 	test_decrypt_rejects_tampered_ciphertext();

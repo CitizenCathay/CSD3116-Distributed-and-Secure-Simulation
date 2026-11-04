@@ -80,6 +80,11 @@ void security_cleanup(void);
 // JoinRequest message - an HMAC of a_int_nonce (JoinRequest.int_nonce)
 void security_make_client_token(int a_int_nonce, char *out_token, size_t token_len);
 
+// Client side: returns a random nonce for JoinRequest.int_nonce from
+// OpenSSL's CSPRNG, so it cannot be predicted from the time or process ID
+// the way rand() could be. The server binds that client's Input to it
+int security_make_nonce(void);
+
 // Server side: validates the credential received in a JoinRequest against
 // that request's nonce. token must be SECURITY_TOKEN_LEN bytes.
 // Returns true if the client should be admitted

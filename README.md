@@ -76,8 +76,10 @@ by hand.)
   back to the built-in key. Generate one with `openssl rand -hex 32`.
 - **Message flow**: client sends `JoinRequest` (with a credential) → server
   verifies it and assigns a player ID → client sends `Input` on keypress →
-  server applies the move (collision-checked) and broadcasts `Position` to
-  every client. A repeated `JoinRequest` nonce (the client's own retries,
+  server applies the move (collision-checked) and immediately broadcasts the
+  new `Position` to every client. A `Position` is only published when it
+  changes; it is transient-local, like `CellClaimed`, so a client that joins
+  later still receives every player's current position. A repeated `JoinRequest` nonce (the client's own retries,
   or a replay) gets the same slot back rather than a new one, and the nonce
   of a player who has left is refused. A player leaves when their `Input`
   instance has no writers left (their client shut down DDS); a slot whose
@@ -86,8 +88,58 @@ by hand.)
   their `Position` instance. Disposed instances are ignored, since any DDS
   participant could dispose another player's instance to kick them.
 - **Threading**: server and client each run a DDS worker thread (networking)
-  alongside their main thread (game-state / rendering). Details are in the
-  comments at the top of each file.
+  alongside their main thread (game-state / rendering). Neither thread
+  polls: each worker sleeps on a DDS waitset until a reader has data or the
+  other thread triggers its guard condition, and the server's main thread
+  sleeps on a condition variable until a join request is queued for it.
+  Joins pass between the server's threads through small queues guarded by
+  the mutex. Details are in the comments at the top of each file.
+
+## Optimizations
+
+Measured on WSL2, both versions built with `-O2`. The old build is the
+security-hardened code before this pass. Latency was measured with a
+headless DDS benchmark client; CPU was sampled from `/proc` per thread over
+10 s; ThreadSanitizer was run on the server.
+
+| Metric | Before | After |
+|---|---|---|
+| Input → Position latency, 2 players (mean) | 51.2 ms | 1.6 ms |
+| Input → Position latency, 5 players (mean) | 156.4 ms | 1.5 ms |
+| Server CPU, 5 idle players | 3.3% | 0.3% |
+| Client DDS worker thread CPU, idle | 2.1% | 0.2% |
+| Client frame rate | ~53 FPS | ~59.5 FPS |
+| Client time from Ctrl+C to exit | - | 59 ms |
+
+What changed:
+
+- **No sleeping while holding the mutex.** The server slept 20 ms per
+  active player inside the Position loop with the mutex locked, so latency
+  grew with the number of players and the main thread was blocked for up to
+  100 ms of every 100 ms tick. It also slept 20 ms after every JoinResponse.
+- **Event-driven threads instead of 1 ms polling.** Both worker threads wait
+  on a DDS waitset (read conditions + a guard condition); the server main
+  thread waits on a `pthread_cond_t`; the client main thread only wakes the
+  worker when the arrow keys actually change.
+- **Publish on change.** The server sent every player's `Position` every
+  100 ms, encrypting each one, whether or not anyone moved. Now a position
+  is sent once, the moment it changes.
+- **Non-blocking move throttle.** The client's worker slept 150 ms after
+  every move while a key was held, so server updates queued up behind it.
+  It now throttles by timestamp and keeps receiving in between.
+- **No repeated computation in the render loop.** Per-player cell counts
+  (drawn every frame) were a full scan of the grid per player per frame;
+  `Grid` now keeps running counts, so `grid_count_owned()` is O(1).
+- **Frame pacing.** The client slept a flat 16 ms after each frame on top of
+  the time spent drawing; it now sleeps only for the rest of the 1/60 s
+  frame budget.
+- **Less time holding the lock.** The server copies shared state under the
+  mutex and encrypts/publishes after releasing it.
+- **`-O2`** for every build in the `Makefile`.
+
+The higher frame rate is why the client's total CPU use (mostly Mesa's
+software-rendering threads under WSL) went up, from 32% to 42%: it now
+draws about 12% more frames.
 
 ## Known security limitations
 
@@ -118,6 +170,5 @@ See the header comment in `security.c` for details.
 
 ## Not yet implemented
 
-- Code optimization pass (with profiler validation for the slides)
 - Real key provisioning/rotation for `security.c`'s pre-shared secrets
   (see Known security limitations above)

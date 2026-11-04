@@ -4,6 +4,8 @@
 
 CC   := gcc
 IDLC := idlc
+# Compiler optimisation for every build (see README.md "Optimizations")
+CFLAGS := -O2
 
 CFLAGS_DDS    := $(shell pkg-config --cflags CycloneDDS)
 LIBS_DDS      := $(shell pkg-config --libs CycloneDDS)
@@ -21,22 +23,22 @@ messages.h messages.c: messages.idl
 	$(IDLC) -l c messages.idl
 
 server: server.c security.c game_logic.c grid_logic.c messages.c
-	$(CC) -o server server.c security.c game_logic.c grid_logic.c messages.c \
+	$(CC) $(CFLAGS) -o server server.c security.c game_logic.c grid_logic.c messages.c \
 		$(CFLAGS_DDS) $(LIBS_DDS) $(CFLAGS_CRYPTO) $(LIBS_CRYPTO)
 
 client: client.c security.c game_logic.c grid_logic.c messages.c
-	$(CC) client.c security.c game_logic.c grid_logic.c messages.c -o client \
+	$(CC) $(CFLAGS) client.c security.c game_logic.c grid_logic.c messages.c -o client \
 		$(CFLAGS_GLFW) -lGL $(LIBS_GLFW) $(CFLAGS_DDS) $(LIBS_DDS) \
 		$(CFLAGS_CRYPTO) $(LIBS_CRYPTO) -pthread -lm
 
 test_security: test_security.c security.c
-	$(CC) test_security.c security.c -o test_security $(CFLAGS_CRYPTO) $(LIBS_CRYPTO)
+	$(CC) $(CFLAGS) test_security.c security.c -o test_security $(CFLAGS_CRYPTO) $(LIBS_CRYPTO)
 
 test_game_logic: test_game_logic.c game_logic.c
-	$(CC) test_game_logic.c game_logic.c -o test_game_logic
+	$(CC) $(CFLAGS) test_game_logic.c game_logic.c -o test_game_logic
 
 test_grid_logic: test_grid_logic.c grid_logic.c game_logic.c
-	$(CC) test_grid_logic.c grid_logic.c game_logic.c -o test_grid_logic
+	$(CC) $(CFLAGS) test_grid_logic.c grid_logic.c game_logic.c -o test_grid_logic
 
 test: test_security test_game_logic test_grid_logic
 	./test_security

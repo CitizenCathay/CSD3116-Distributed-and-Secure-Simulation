@@ -33,10 +33,15 @@ messages. */
 // Length of a round in seconds (the server runs it, the client shows it)
 #define ROUND_SECS 60
 
-// Owner (player ID) of each cell, row-major: index = row * GRID_COLS + col
+// Owner (player ID) of each cell, row-major: index = row * GRID_COLS + col.
+// arr_count[id] is how many cells id owns (arr_count[0] = unclaimed),
+// kept up to date by grid_set_owner() so scores never need a full scan of
+// the grid - the client draws them every frame. Only change cells through
+// grid_set_owner()/grid_claim(), or arr_count goes stale
 typedef struct
 {
 	int arr_owner[GRID_ROWS * GRID_COLS];
+	int arr_count[MAX_PLAYERS + 1];
 } Grid;
 
 // Marks every cell as unclaimed
@@ -48,8 +53,9 @@ void grid_init(Grid *a_grid);
 void grid_cell_at(int a_int_x, int a_int_y, int *out_col, int *out_row);
 
 // Sets the owner of one cell. Returns true if the cell is inside the
-// grid and its owner actually changed; false otherwise (out of range or
-// already owned by a_int_owner_id).
+// grid and its owner actually changed; false otherwise (cell out of range,
+// owner not GRID_UNCLAIMED or 1..MAX_PLAYERS, or already owned by
+// a_int_owner_id).
 bool grid_set_owner(Grid *a_grid, int a_int_col, int a_int_row,
 	int a_int_owner_id);
 
@@ -60,7 +66,8 @@ bool grid_set_owner(Grid *a_grid, int a_int_col, int a_int_row,
 bool grid_claim(Grid *a_grid, int a_int_player_id, int a_int_x, int a_int_y,
 	int *out_col, int *out_row);
 
-// Returns how many cells a_int_player_id currently owns
+// Returns how many cells a_int_player_id currently owns (0 for an ID
+// outside 1..MAX_PLAYERS). Constant time - see Grid.arr_count
 int grid_count_owned(const Grid *a_grid, int a_int_player_id);
 
 // Returns the ID of the player (1..a_int_max_players) owning the most
