@@ -34,7 +34,6 @@ static int g_int_tests_failed = 0;
 		} \
 	} while (0)
 
-#define MAX_PLAYERS 5
 
 static void reset_players(Player arr_players[MAX_PLAYERS])
 {

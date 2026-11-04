@@ -20,6 +20,10 @@ include this instead of each keeping their own copy. */
 
 #include <stdbool.h>
 
+// The baseline supports at most five clients (Slide 7). Player IDs are
+// 1..MAX_PLAYERS
+#define MAX_PLAYERS 5
+
 // The window is 800x600 and each player is a 50x50 square (Slide 7)
 #define WIDTH    800
 #define HEIGHT   600

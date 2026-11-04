@@ -32,7 +32,6 @@ static int g_int_tests_failed = 0;
 		} \
 	} while (0)
 
-#define MAX_PLAYERS 5
 #define NSECS 1000000000LL
 
 static void test_init_clears_grid(void)
@@ -170,6 +169,45 @@ static void test_winner_nobody_claimed(void)
 	TEST_ASSERT(grid_winner(&grid, MAX_PLAYERS) == 0, "empty grid has no winner");
 }
 
+static void test_counts_track_every_change(void)
+{
+	// grid_count_owned() reads a running count instead of scanning the
+	// grid, so check it against a full scan after a mix of claims, steals
+	// and releases
+	Grid grid;
+	grid_init(&grid);
+	for (int i = 0; i < 40; i++)
+		grid_set_owner(&grid, i % GRID_COLS, i / GRID_COLS, 1 + i % MAX_PLAYERS);
+	for (int i = 0; i < 20; i++)
+		grid_set_owner(&grid, i % GRID_COLS, i / GRID_COLS, 2);
+	for (int i = 0; i < 7; i++)
+		grid_set_owner(&grid, i, 0, GRID_UNCLAIMED);
+
+	bool b_match = true;
+	for (int id = 1; id <= MAX_PLAYERS; id++)
+	{
+		int int_scanned = 0;
+		for (int i = 0; i < GRID_ROWS * GRID_COLS; i++)
+			if (grid.arr_owner[i] == id)
+				int_scanned++;
+		if (grid_count_owned(&grid, id) != int_scanned)
+			b_match = false;
+	}
+	TEST_ASSERT(b_match, "running counts should match a full scan of the grid");
+	TEST_ASSERT(grid_count_owned(&grid, 0) == 0 && grid_count_owned(&grid, MAX_PLAYERS + 1) == 0,
+		"IDs outside 1..MAX_PLAYERS own nothing");
+}
+
+static void test_set_owner_rejects_unknown_player(void)
+{
+	Grid grid;
+	grid_init(&grid);
+	TEST_ASSERT(grid_set_owner(&grid, 0, 0, MAX_PLAYERS + 1) == false,
+		"an owner above MAX_PLAYERS is rejected");
+	TEST_ASSERT(grid_set_owner(&grid, 0, 0, -1) == false, "a negative owner is rejected");
+	TEST_ASSERT(grid.arr_owner[0] == GRID_UNCLAIMED, "rejected owners leave the cell untouched");
+}
+
 static void test_seconds_left(void)
 {
 	TEST_ASSERT(grid_seconds_left(0, 0, 60) == 60, "full time at the start");
@@ -197,6 +235,8 @@ int main(void)
 	test_winner_tie_is_draw();
 	test_winner_tie_below_top_is_not_draw();
 	test_winner_nobody_claimed();
+	test_counts_track_every_change();
+	test_set_owner_rejects_unknown_player();
 	test_seconds_left();
 
 	printf("%d tests run, %d failed\n", g_int_tests_run, g_int_tests_failed);

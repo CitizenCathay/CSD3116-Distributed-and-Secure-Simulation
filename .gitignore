@@ -14,3 +14,6 @@ test_grid_logic
 
 # Run logs from manual testing
 *.log
+
+# Claude Code local settings
+.claude/

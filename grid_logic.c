@@ -18,6 +18,9 @@ void grid_init(Grid *a_grid)
 {
 	for (int i = 0; i < GRID_ROWS * GRID_COLS; i++)
 		a_grid->arr_owner[i] = GRID_UNCLAIMED;
+	for (int id = 0; id <= MAX_PLAYERS; id++)
+		a_grid->arr_count[id] = 0;
+	a_grid->arr_count[GRID_UNCLAIMED] = GRID_ROWS * GRID_COLS;
 }
 
 void grid_cell_at(int a_int_x, int a_int_y, int *out_col, int *out_row)
@@ -45,13 +48,18 @@ bool grid_set_owner(Grid *a_grid, int a_int_col, int a_int_row,
 	int a_int_owner_id)
 {
 	if (a_int_col < 0 || a_int_col >= GRID_COLS ||
-		a_int_row < 0 || a_int_row >= GRID_ROWS)
+		a_int_row < 0 || a_int_row >= GRID_ROWS ||
+		a_int_owner_id < GRID_UNCLAIMED || a_int_owner_id > MAX_PLAYERS)
 		return false;
 
 	int *ptr_owner = &a_grid->arr_owner[a_int_row * GRID_COLS + a_int_col];
 	if (*ptr_owner == a_int_owner_id)
 		return false;
 
+	// Move the cell from its old owner's count to the new one's, so
+	// grid_count_owned() never has to rescan the grid
+	a_grid->arr_count[*ptr_owner]--;
+	a_grid->arr_count[a_int_owner_id]++;
 	*ptr_owner = a_int_owner_id;
 	return true;
 }
@@ -65,13 +73,9 @@ bool grid_claim(Grid *a_grid, int a_int_player_id, int a_int_x, int a_int_y,
 
 int grid_count_owned(const Grid *a_grid, int a_int_player_id)
 {
-	int int_count = 0;
-	for (int i = 0; i < GRID_ROWS * GRID_COLS; i++)
-	{
-		if (a_grid->arr_owner[i] == a_int_player_id)
-			int_count++;
-	}
-	return int_count;
+	if (a_int_player_id < 1 || a_int_player_id > MAX_PLAYERS)
+		return 0;
+	return a_grid->arr_count[a_int_player_id];
 }
 
 int grid_winner(const Grid *a_grid, int a_int_max_players)
