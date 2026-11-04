@@ -40,9 +40,10 @@ struct Input
 	// before the server reads them
 	@key long int_player_id;
     char ch_direction;
-	// Encrypted copy of this message's payload - see security.h
-	// Samples with len_cipher == 0 or a cipher that fails to decrypt are
-	// dropped; arr_cipher size must match SECURITY_CIPHERTEXT_LEN in
+	// Encrypted copy of this message's payload - see security.h. Bound to
+	// int_player_id and the join nonce the player was admitted with
+	// Samples with len_cipher == 0, a cipher that fails to decrypt, or a
+	// replay are dropped; arr_cipher size must match SECURITY_CIPHERTEXT_LEN in
 	// security.h
 	octet arr_cipher[64];
 	unsigned long len_cipher;
@@ -58,9 +59,10 @@ struct CellClaimed
 	@key long int_cell_y;
 	// 0 = unclaimed, otherwise the player ID
 	long int_owner_id;
-	// Encrypted copy of this message's payload - see security.h
-	// Samples with len_cipher == 0 or a cipher that fails to decrypt are
-	// dropped; arr_cipher size must match SECURITY_CIPHERTEXT_LEN in
+	// Encrypted copy of this message's payload - see security.h. Bound to
+	// int_cell_x/int_cell_y
+	// Samples with len_cipher == 0, a cipher that fails to decrypt, or a
+	// replay are dropped; arr_cipher size must match SECURITY_CIPHERTEXT_LEN in
 	// security.h
 	octet arr_cipher[64];
 	unsigned long len_cipher;
@@ -77,8 +79,8 @@ struct GameState
 	// Only meaningful once b_game_over is true; 0 = draw
 	long int_winner_id;
 	// Encrypted copy of this message's payload - see security.h
-	// Samples with len_cipher == 0 or a cipher that fails to decrypt are
-	// dropped; arr_cipher size must match SECURITY_CIPHERTEXT_LEN in
+	// Samples with len_cipher == 0, a cipher that fails to decrypt, or a
+	// replay are dropped; arr_cipher size must match SECURITY_CIPHERTEXT_LEN in
 	// security.h
 	octet arr_cipher[64];
 	unsigned long len_cipher;
@@ -94,9 +96,10 @@ struct Position
 	@key long int_player_id;
 	long int_x;
 	long int_y;
-	// Encrypted copy of this message's payload - see security.h
-	// Samples with len_cipher == 0 or a cipher that fails to decrypt are
-	// dropped; arr_cipher size must match SECURITY_CIPHERTEXT_LEN in
+	// Encrypted copy of this message's payload - see security.h. Bound to
+	// int_player_id
+	// Samples with len_cipher == 0, a cipher that fails to decrypt, or a
+	// replay are dropped; arr_cipher size must match SECURITY_CIPHERTEXT_LEN in
 	// security.h
 	octet arr_cipher[64];
 	unsigned long len_cipher;

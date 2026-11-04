@@ -51,6 +51,14 @@ watch out for break out of loop */
 // How long the result stays on screen before a new round starts
 // automatically - no need to restart the server to play again
 #define INTERMISSION_SECS 5
+// A newly admitted player must send its first Input within this long, or
+// its slot is freed again. Leaves are otherwise only noticed when a
+// player's Input instance loses its writer, which never happens for a
+// slot whose client never wrote one (eg a replayed JoinRequest)
+#define FIRST_INPUT_TIMEOUT_SECS 10
+// How many departed players' join nonces are remembered, so a recorded
+// JoinRequest of theirs cannot be replayed to take a new slot
+#define MAX_RETIRED_NONCES 64
 
 // ### GLOBAL VARIABLES ###
 int int_num_active_players = 0;
@@ -77,26 +85,63 @@ int int_new_player_nonce = 0;
 // Active/X/Y, and the player ID is the array index plus 1 so a player can
 // be looked up directly (Slide 10, Figure 3)
 static Player arr_Players[MAX_PLAYERS] = {0};
+
+// Per-slot session state, indexed like arr_Players. Guarded by mutex
+// Nonce of the JoinRequest each slot was admitted with. Input is bound to
+// it (see security.h), and a retried request with the same nonce gets the
+// same slot back instead of a second one
+static int arr_player_nonce[MAX_PLAYERS];
+// When each slot was admitted, and whether its first Input has arrived
+// yet - see FIRST_INPUT_TIMEOUT_SECS
+static dds_time_t arr_join_time[MAX_PLAYERS];
+static bool arr_b_input_seen[MAX_PLAYERS];
+// Replay protection for each slot's Input stream - see security.h
+static SecurityReplayGuard arr_input_guard[MAX_PLAYERS];
+
+// Join nonces of players who have left: a ring buffer holding the last
+// int_num_retired of them, next written at int_next_retired. Guarded by mutex
+static int arr_retired_nonce[MAX_RETIRED_NONCES];
+static int int_num_retired = 0;
+static int int_next_retired = 0;
+
 // Guards the variables shared by the main thread and the DDS worker thread,
 // so neither reads a value while the other is changing it. Every lock must
 // be matched by an unlock (Slide 12)
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// True if a_int_nonce belongs to a player who has left. The caller must
+// hold mutex
+static bool is_nonce_retired(int a_int_nonce)
+{
+	for (int i = 0; i < int_num_retired; i++)
+	{
+		if (arr_retired_nonce[i] == a_int_nonce)
+			return true;
+	}
+	return false;
+}
+
 // Publishes that a cell changed owner (0 = unclaimed)
 static void publish_cell_claimed(dds_entity_t a_writer, int a_int_col,
 	int a_int_row, int a_int_owner_id)
 {
+	// Zeroed, so the unused tail of arr_cipher never carries stack memory
+	// onto the network
 	CellClaimed claim;
+	memset(&claim, 0, sizeof(claim));
 	claim.int_cell_x = a_int_col;
 	claim.int_cell_y = a_int_row;
-	claim.int_owner_id = a_int_owner_id;
 
 	// Encrypt the payload before publishing - see security.h. Clients drop
 	// anything without a valid cipher, so if encryption ever fails there is
-	// no point sending (and leaking) the plaintext
-	int arr_plain[3] = { a_int_col, a_int_row, a_int_owner_id };
+	// no point sending (and leaking) the plaintext. The cipher is bound to
+	// the cell (the DDS key, which stays in the clear for routing), so it
+	// cannot be replayed as another cell's owner
+	int arr_bound[2] = { a_int_col, a_int_row };
+	int arr_plain[1] = { a_int_owner_id };
 	size_t cipher_len = 0;
-	if (!security_encrypt((unsigned char *)arr_plain, sizeof(arr_plain),
+	if (!security_encrypt(SECURITY_MSG_CELL_CLAIMED, arr_bound, 2,
+		(unsigned char *)arr_plain, sizeof(arr_plain),
 		claim.arr_cipher, &cipher_len) ||
 		cipher_len > sizeof(claim.arr_cipher))
 	{
@@ -104,10 +149,8 @@ static void publish_cell_claimed(dds_entity_t a_writer, int a_int_col,
 		return;
 	}
 	claim.len_cipher = (unsigned long)cipher_len;
-	// Blank the plaintext owner, so it is only readable from the
-	// ciphertext. int_cell_x/y stay in the clear - they are the DDS
-	// key this instance is routed by, not secret payload
-	claim.int_owner_id = GRID_UNCLAIMED;
+	// int_owner_id stays GRID_UNCLAIMED: the owner is only readable from
+	// the ciphertext
 
 	dds_return_t rc = dds_write(a_writer, &claim);
 	if (rc != DDS_RETCODE_OK)
@@ -120,18 +163,19 @@ static void publish_cell_claimed(dds_entity_t a_writer, int a_int_col,
 static void publish_game_state(dds_entity_t a_writer, int a_int_seconds_left,
 	bool a_b_started, bool a_b_game_over, int a_int_winner_id)
 {
+	// Zeroed, so the unused tail of arr_cipher never carries stack memory
+	// onto the network. GameState has no DDS key, so every plaintext field
+	// is payload and stays zero; it is only readable from the ciphertext
 	GameState state;
-	state.int_seconds_left = a_int_seconds_left;
-	state.b_started = a_b_started;
-	state.b_game_over = a_b_game_over;
-	state.int_winner_id = a_int_winner_id;
+	memset(&state, 0, sizeof(state));
 
 	// Encrypt the payload before publishing - see security.h. Clients drop
 	// anything without a valid cipher, so skip sending if encryption fails
 	int arr_plain[4] = { a_int_seconds_left, a_b_started, a_b_game_over,
 		a_int_winner_id };
 	size_t cipher_len = 0;
-	if (!security_encrypt((unsigned char *)arr_plain, sizeof(arr_plain),
+	if (!security_encrypt(SECURITY_MSG_GAME_STATE, NULL, 0,
+		(unsigned char *)arr_plain, sizeof(arr_plain),
 		state.arr_cipher, &cipher_len) ||
 		cipher_len > sizeof(state.arr_cipher))
 	{
@@ -139,12 +183,6 @@ static void publish_game_state(dds_entity_t a_writer, int a_int_seconds_left,
 		return;
 	}
 	state.len_cipher = (unsigned long)cipher_len;
-	// GameState has no DDS key, so every field here is payload -
-	// blank all of them; it is only readable from the ciphertext
-	state.int_seconds_left = 0;
-	state.b_started = false;
-	state.b_game_over = false;
-	state.int_winner_id = 0;
 
 	dds_return_t rc = dds_write(a_writer, &state);
 	if (rc != DDS_RETCODE_OK)
@@ -169,6 +207,13 @@ static void handle_player_left(int a_int_player_id, Grid *a_grid,
 	{
 		arr_Players[a_int_player_id - 1].b_active = false;
 		int_num_active_players--;
+		// Their JoinRequest (nonce + token) was sent in the clear, so
+		// refuse it from now on rather than let a recording of it take
+		// this slot back without a client behind it
+		arr_retired_nonce[int_next_retired] = arr_player_nonce[a_int_player_id - 1];
+		int_next_retired = (int_next_retired + 1) % MAX_RETIRED_NONCES;
+		if (int_num_retired < MAX_RETIRED_NONCES)
+			int_num_retired++;
 	}
 	pthread_mutex_unlock(&mutex);
 
@@ -319,12 +364,18 @@ void *worker(void *arg)
         NULL
     );
     
+	// Reliable, so a client's one "hello" Input is never silently dropped -
+	// a slot whose first Input never arrives is freed after
+	// FIRST_INPUT_TIMEOUT_SECS, which would kick an idle but connected player
+	dds_qos_t *qos_input = dds_create_qos();
+	dds_qset_reliability(qos_input, DDS_RELIABILITY_RELIABLE, DDS_SECS(1));
 	input_reader = dds_create_reader(
         participant,
         input_topic,
-        NULL,
+        qos_input,
         NULL
     );
+	dds_delete_qos(qos_input);
     
 	 /* ----------------------------------------------------- */
     /* Create writers                                         */
@@ -444,24 +495,23 @@ void *worker(void *arg)
 			// Reset the player ID
 			int_new_player_id = -1;
 			pthread_mutex_unlock(&mutex);
-			// The player ID can be 0, ie invalid
-			response.int_player_id = int_new_player_id_temp;
-			response.int_nonce = int_new_player_nonce_temp;
+			// Zeroed, so the unused tail of arr_cipher never carries stack
+			// memory onto the network. The plaintext fields stay zero: the
+			// response is only authentic/readable via the ciphertext
+			memset(&response, 0, sizeof(response));
 
 			// Encrypt the payload before publishing - see security.h. Lets
 			// the client verify this response really came from a holder
-			// of the shared key, not just something that claims to
-			int arr_plain[2] = { response.int_player_id, response.int_nonce };
+			// of the shared key, not just something that claims to.
+			// The player ID can be 0, ie invalid
+			int arr_plain[2] = { int_new_player_id_temp, int_new_player_nonce_temp };
 			size_t cipher_len = 0;
-			if (security_encrypt((unsigned char *)arr_plain, sizeof(arr_plain),
+			if (security_encrypt(SECURITY_MSG_JOIN_RESPONSE, NULL, 0,
+				(unsigned char *)arr_plain, sizeof(arr_plain),
 				response.arr_cipher, &cipher_len) &&
 				cipher_len <= sizeof(response.arr_cipher))
 			{
 				response.len_cipher = (unsigned long)cipher_len;
-				// Blank the plaintext copy, so the response is only
-				// authentic/readable via the ciphertext
-				response.int_player_id = 0;
-				response.int_nonce = 0;
 
 				rc = dds_write(response_writer, &response);
 				if (rc != DDS_RETCODE_OK)
@@ -496,26 +546,28 @@ void *worker(void *arg)
 				// If player is active
 				if(arr_Players[i].b_active == true)
 				{
+					// Zeroed, so the unused tail of arr_cipher never
+					// carries stack memory onto the network. int_x/int_y
+					// stay zero: the position is only readable from the
+					// ciphertext
+					memset(&position, 0, sizeof(position));
 					position.int_player_id = i+1;
-					position.int_x = arr_Players[i].x;
-					position.int_y = arr_Players[i].y;
 
 					// Encrypt the payload before publishing - see security.h.
 					// Clients drop anything without a valid cipher, so skip
-					// sending if encryption fails
-					int arr_plain[2] = { position.int_x, position.int_y };
+					// sending if encryption fails. The cipher is bound to
+					// int_player_id (the DDS key, which stays in the clear
+					// for routing/leave detection), so it cannot be
+					// replayed as another player's position
+					int arr_bound[1] = { i+1 };
+					int arr_plain[2] = { arr_Players[i].x, arr_Players[i].y };
 					size_t cipher_len = 0;
-					if (security_encrypt((unsigned char *)arr_plain, sizeof(arr_plain),
+					if (security_encrypt(SECURITY_MSG_POSITION, arr_bound, 1,
+						(unsigned char *)arr_plain, sizeof(arr_plain),
 						position.arr_cipher, &cipher_len) &&
 						cipher_len <= sizeof(position.arr_cipher))
 					{
 						position.len_cipher = (unsigned long)cipher_len;
-						// Blank the plaintext coords, so position is only
-						// readable from the ciphertext. int_player_id stays
-						// in the clear - it is the DDS key this instance is
-						// routed/leave-detected by, not secret payload
-						position.int_x = 0;
-						position.int_y = 0;
 
 						rc = dds_write(position_writer, &position);
 						if (rc != DDS_RETCODE_OK)
@@ -544,6 +596,30 @@ void *worker(void *arg)
 					dds_sleepfor (DDS_MSECS (20));
 				}
 				pthread_mutex_unlock(&mutex);
+			}
+
+			// Free any slot whose first Input never arrived - see
+			// FIRST_INPUT_TIMEOUT_SECS. Collected under the lock, then freed
+			// outside it, since handle_player_left() takes the lock itself
+			bool arr_b_expired[MAX_PLAYERS] = {0};
+			pthread_mutex_lock(&mutex);
+			// Read under the lock (not curr_time), so it can never be
+			// earlier than a join time the main thread just recorded
+			dds_time_t join_check_time = dds_time();
+			for (int i = 0; i < MAX_PLAYERS; i++)
+			{
+				arr_b_expired[i] = arr_Players[i].b_active && !arr_b_input_seen[i] &&
+					join_check_time - arr_join_time[i] > DDS_SECS(FIRST_INPUT_TIMEOUT_SECS);
+			}
+			pthread_mutex_unlock(&mutex);
+			for (int i = 0; i < MAX_PLAYERS; i++)
+			{
+				if (arr_b_expired[i])
+				{
+					printf("Player %d sent no Input within %d seconds\n", i + 1,
+						FIRST_INPUT_TIMEOUT_SECS);
+					handle_player_left(i + 1, &grid, cell_writer, position_writer);
+				}
 			}
 		}
 
@@ -656,38 +732,53 @@ void *worker(void *arg)
 
 			// printf("Input received\n");
 			Input *input = (Input *) samples_input[0];
-			// Get the input player ID
+			// Get the input player ID - the plaintext DDS key, authenticated
+			// below as part of the cipher's associated data
 			int int_input_player_id = input->int_player_id;
-			// Get the input direction
-			char ch_input_dir = input->ch_direction;
 			/* printf("%d=%c\n", int_input_player_id, ch_input_dir); */
 
-			// Decrypt the payload - see security.h. Input without a valid
-			// cipher is dropped, never read from the plaintext fields above,
-			// or anyone on the DDS domain could move any player without the key
-			unsigned char arr_plain[sizeof(int) + sizeof(char)];
-			size_t plain_len = 0;
-			if (input->len_cipher == 0 ||
-				!security_decrypt(input->arr_cipher, input->len_cipher,
-				arr_plain, sizeof(arr_plain), &plain_len) ||
-				plain_len != sizeof(arr_plain))
-			{
-				continue;
-			}
-			memcpy(&int_input_player_id, arr_plain, sizeof(int));
-			memcpy(&ch_input_dir, arr_plain + sizeof(int), sizeof(char));
-            
 			// Ignore input from an unknown player ID, since it indexes arr_Players
 			if (int_input_player_id < 1 || int_input_player_id > MAX_PLAYERS)
 				continue;
 
+			pthread_mutex_lock(&mutex);
+			if (!arr_Players[int_input_player_id - 1].b_active)
+			{
+				pthread_mutex_unlock(&mutex);
+				continue;
+			}
+
+			// Decrypt the payload - see security.h. Input without a valid
+			// cipher is dropped, never read from the plaintext fields, or
+			// anyone on the DDS domain could move any player without the key.
+			// It must also be bound to this player ID and the nonce this
+			// slot was admitted with, and newer than the last Input accepted
+			// for the slot - so a recorded Input cannot be replayed, either
+			// as this player or into a later player's session in the slot
+			int arr_bound[2] = { int_input_player_id,
+				arr_player_nonce[int_input_player_id - 1] };
+			unsigned char arr_plain[1];
+			size_t plain_len = 0;
+			if (input->len_cipher == 0 ||
+				!security_decrypt(SECURITY_MSG_INPUT, arr_bound, 2,
+				&arr_input_guard[int_input_player_id - 1],
+				input->arr_cipher, input->len_cipher,
+				arr_plain, sizeof(arr_plain), &plain_len) ||
+				plain_len != sizeof(arr_plain))
+			{
+				pthread_mutex_unlock(&mutex);
+				continue;
+			}
+			char ch_input_dir = (char)arr_plain[0];
+			// Their client is really there, so the slot is no longer at risk
+			// of being freed by FIRST_INPUT_TIMEOUT_SECS
+			arr_b_input_seen[int_input_player_id - 1] = true;
+
 			// Compute the move and apply it if legal - see game_logic.h
 				// (a square may not leave the window or overlap another
 				// player's square, Slide 7)
-			pthread_mutex_lock(&mutex);
 			int int_new_x, int_new_y;
-			bool b_moved = arr_Players[int_input_player_id - 1].b_active &&
-				game_try_move(arr_Players, MAX_PLAYERS,
+			bool b_moved = game_try_move(arr_Players, MAX_PLAYERS,
 				int_input_player_id, ch_input_dir, &int_new_x, &int_new_y);
 			// Players are frozen once the round is over
 			if (b_moved && !b_game_over)
@@ -752,8 +843,30 @@ int main(void)
 			pthread_mutex_lock(&mutex);
 			b_player_join = false;
 			int_new_player_nonce = int_join_nonce;
+
+			// A client resends its JoinRequest every second until answered,
+			// and anyone can replay one they recorded, so the same nonce can
+			// arrive many times. An active player's nonce gets its existing
+			// slot again rather than a second one
+			int int_existing_slot = -1;
+			for (int i = 0; i < MAX_PLAYERS; i++)
+			{
+				if (arr_Players[i].b_active && arr_player_nonce[i] == int_join_nonce)
+					int_existing_slot = i;
+			}
+
 			int int_slot = game_find_free_slot(arr_Players, MAX_PLAYERS);
-			if (int_slot == -1)
+			if (int_existing_slot != -1)
+			{
+				int_new_player_id = int_existing_slot + 1;
+			}
+			else if (is_nonce_retired(int_join_nonce))
+			{
+				// A departed player's request being replayed: no response.
+				// Their real client picks a new nonce if it ever rejoins
+				printf("Join request ignored: nonce already used\n");
+			}
+			else if (int_slot == -1)
 			{
 				// Set invalid player ID
 				int_new_player_id = 0;
@@ -771,6 +884,14 @@ int main(void)
 				// Set the coords
 				arr_Players[int_slot].x = int_rand_x;
 				arr_Players[int_slot].y = int_rand_y;
+
+				// Start this slot's session: its Input is bound to this
+				// nonce, the previous occupant's replay state is dropped,
+				// and the first-Input timer starts
+				arr_player_nonce[int_slot] = int_join_nonce;
+				arr_input_guard[int_slot] = (SecurityReplayGuard){0};
+				arr_join_time[int_slot] = dds_time();
+				arr_b_input_seen[int_slot] = false;
 
 				// Set player ID to be the index plus 1
 				int_new_player_id = int_slot+1;

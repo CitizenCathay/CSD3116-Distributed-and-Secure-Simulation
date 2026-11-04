@@ -533,33 +533,35 @@ static void draw_spectator_banner(double a_d_time)
 }
 
 // Sends one Input for a_int_player_id: the arrow-key direction, or 'n' for
-// none. Used both for real moves and for the first "hello" Input
+// none. Used both for real moves and for the first "hello" Input.
+// a_int_join_nonce is the nonce of the JoinRequest that won us this player
+// ID, which the server binds our Input to
 static void publish_input(dds_entity_t a_writer, int a_int_player_id,
-	char a_ch_direction)
+	int a_int_join_nonce, char a_ch_direction)
 {
 	Input input;
 	memset(&input, 0, sizeof(input));
 	input.int_player_id = a_int_player_id;
-	input.ch_direction = a_ch_direction;
 
 	// Encrypt the payload before publishing - see security.h. The server
 	// drops anything without a valid cipher, so skip sending if
-	// encryption fails
-	unsigned char arr_plain[sizeof(int) + sizeof(char)];
-	memcpy(arr_plain, &input.int_player_id, sizeof(int));
-	memcpy(arr_plain + sizeof(int), &input.ch_direction, sizeof(char));
+	// encryption fails. The cipher is bound to our player ID (the DDS key,
+	// which stays in the clear for routing/leave detection) and join
+	// nonce, so it cannot be replayed as another player's Input, or into
+	// a later player's session with the same ID
+	int arr_bound[2] = { a_int_player_id, a_int_join_nonce };
+	unsigned char arr_plain[1] = { (unsigned char)a_ch_direction };
 	size_t cipher_len = 0;
-	if (!security_encrypt(arr_plain, sizeof(arr_plain),
-		input.arr_cipher, &cipher_len) ||
+	if (!security_encrypt(SECURITY_MSG_INPUT, arr_bound, 2, arr_plain,
+		sizeof(arr_plain), input.arr_cipher, &cipher_len) ||
 		cipher_len > sizeof(input.arr_cipher))
 	{
 		fprintf(stderr, "Input not sent: encryption failed\n");
 		return;
 	}
 	input.len_cipher = (unsigned long)cipher_len;
-	// Blank the plaintext copy, so the direction is only readable from
-	// the ciphertext. int_player_id stays in the clear - it is the DDS
-	// key this instance is routed/leave-detected by, not secret payload
+	// ch_direction stays 'n': the direction is only readable from the
+	// ciphertext
 	input.ch_direction = 'n';
 
 	dds_return_t rc = dds_write(a_writer, &input);
@@ -763,6 +765,14 @@ void *worker(void *arg)
 	samples_cell[0] = CellClaimed__alloc();
 	samples_state[0] = GameState__alloc();
 
+	// Replay protection - see security.h. One guard per stream the server
+	// sends us: each keyed instance (player, cell) is its own stream. Only
+	// this thread touches them
+	SecurityReplayGuard response_guard = {0};
+	SecurityReplayGuard state_guard = {0};
+	SecurityReplayGuard arr_position_guard[MAX_PLAYERS] = {0};
+	SecurityReplayGuard arr_cell_guard[GRID_ROWS * GRID_COLS] = {0};
+
 	// Record the time now
 	uint64_t last_join_req_time = dds_time();
 	// Whether our first (no-direction) Input has gone out yet
@@ -806,7 +816,8 @@ void *worker(void *arg)
 				unsigned char arr_plain[sizeof(int) * 2];
 				size_t plain_len = 0;
 				if (response->len_cipher == 0 ||
-					!security_decrypt(response->arr_cipher, response->len_cipher,
+					!security_decrypt(SECURITY_MSG_JOIN_RESPONSE, NULL, 0,
+					&response_guard, response->arr_cipher, response->len_cipher,
 					arr_plain, sizeof(arr_plain), &plain_len) ||
 					plain_len != sizeof(arr_plain))
 				{
@@ -879,13 +890,14 @@ void *worker(void *arg)
 			// unnoticed by the server
 			if (!b_sent_hello)
 			{
-				publish_input(input_writer, int_player_id_temp, 'n');
+				publish_input(input_writer, int_player_id_temp, request.int_nonce, 'n');
 				b_sent_hello = true;
 			}
 			// If there is some direction input
 			if(ch_dir_temp != 'n')
 			{
-				publish_input(input_writer, int_player_id_temp, ch_dir_temp);
+				publish_input(input_writer, int_player_id_temp, request.int_nonce,
+					ch_dir_temp);
 				// Throttle to MOVE_REPEAT_MSECS, so holding a key steps one
 				// grid cell at a time instead of blurring across several
 				dds_sleepfor(DDS_MSECS(MOVE_REPEAT_MSECS));
@@ -908,20 +920,28 @@ void *worker(void *arg)
 			int int_cell_y = claim->int_cell_y;
 			int int_owner_id = claim->int_owner_id;
 
+			// The cell is the plaintext DDS key and indexes arr_cell_guard,
+			// so reject anything off the grid
+			if (int_cell_x < 0 || int_cell_x >= GRID_COLS ||
+				int_cell_y < 0 || int_cell_y >= GRID_ROWS)
+				continue;
+
 			// Decrypt the payload - see security.h. A message that is
-			// unencrypted or fails authentication is dropped
-			unsigned char arr_plain[sizeof(int) * 3];
+			// unencrypted, fails authentication, was made for another cell
+			// or is a replay is dropped
+			int arr_bound[2] = { int_cell_x, int_cell_y };
+			unsigned char arr_plain[sizeof(int)];
 			size_t plain_len = 0;
 			if (claim->len_cipher == 0 ||
-				!security_decrypt(claim->arr_cipher, claim->len_cipher,
+				!security_decrypt(SECURITY_MSG_CELL_CLAIMED, arr_bound, 2,
+				&arr_cell_guard[int_cell_y * GRID_COLS + int_cell_x],
+				claim->arr_cipher, claim->len_cipher,
 				arr_plain, sizeof(arr_plain), &plain_len) ||
 				plain_len != sizeof(arr_plain))
 			{
 				continue;
 			}
-			memcpy(&int_cell_x, arr_plain, sizeof(int));
-			memcpy(&int_cell_y, arr_plain + sizeof(int), sizeof(int));
-			memcpy(&int_owner_id, arr_plain + sizeof(int) * 2, sizeof(int));
+			memcpy(&int_owner_id, arr_plain, sizeof(int));
 
 			// Player IDs are 1..MAX_PLAYERS, 0 = unclaimed
 			if (int_owner_id < 0 || int_owner_id > MAX_PLAYERS)
@@ -951,7 +971,8 @@ void *worker(void *arg)
 			unsigned char arr_plain[sizeof(int) * 4];
 			size_t plain_len = 0;
 			if (state->len_cipher == 0 ||
-				!security_decrypt(state->arr_cipher, state->len_cipher,
+				!security_decrypt(SECURITY_MSG_GAME_STATE, NULL, 0, &state_guard,
+				state->arr_cipher, state->len_cipher,
 				arr_plain, sizeof(arr_plain), &plain_len) ||
 				plain_len != sizeof(arr_plain))
 			{
@@ -1013,13 +1034,22 @@ void *worker(void *arg)
 			int int_position_x = position->int_x;
 			int int_position_y = position->int_y;
 
+			// The player ID is the plaintext DDS key and indexes arr_Players
+			// and arr_position_guard, so reject anything out of range
+			if (int_position_player_id < 1 || int_position_player_id > MAX_PLAYERS)
+				continue;
+
 			// Decrypt the payload - see security.h. A message that is
-			// unencrypted or fails authentication is dropped, never read
-			// from the plaintext fields above
+			// unencrypted, fails authentication, was made for another
+			// player or is a replay is dropped, never read from the
+			// plaintext fields above
+			int arr_bound[1] = { int_position_player_id };
 			unsigned char arr_plain[sizeof(int) * 2];
 			size_t plain_len = 0;
 			if (position->len_cipher == 0 ||
-				!security_decrypt(position->arr_cipher, position->len_cipher,
+				!security_decrypt(SECURITY_MSG_POSITION, arr_bound, 1,
+				&arr_position_guard[int_position_player_id - 1],
+				position->arr_cipher, position->len_cipher,
 				arr_plain, sizeof(arr_plain), &plain_len) ||
 				plain_len != sizeof(arr_plain))
 			{
@@ -1027,11 +1057,6 @@ void *worker(void *arg)
 			}
 			memcpy(&int_position_x, arr_plain, sizeof(int));
 			memcpy(&int_position_y, arr_plain + sizeof(int), sizeof(int));
-
-			// The player ID is the plaintext DDS key and indexes arr_Players,
-			// so reject anything out of range
-			if (int_position_player_id < 1 || int_position_player_id > MAX_PLAYERS)
-				continue;
 
 			pthread_mutex_lock(&mutex);
 			// Set this player to active

@@ -16,25 +16,55 @@ publish and receive). Implements the two required security features
    HMAC-SHA256 of the request's nonce under a 32-byte pre-shared key, so
    the key itself is never sent over the network
 2. Encryption of DDS traffic - AES-256-GCM (confidentiality + tamper
-   detection) via OpenSSL's EVP API
+   detection) via OpenSSL's EVP API. Each ciphertext is also bound, via
+   GCM associated data, to its message type and the DDS key fields it is
+   published under, and carries a sequence number receivers use to drop
+   replays
 
 See security.c's header comment for the pre-shared-key scheme and why it's
-a course-project simplification, not production key management. */
+a course-project simplification, not production key management - in
+particular, every client holds the same key, so this protects against
+outsiders on the DDS domain, not against a malicious client. */
 
 #ifndef SECURITY_H
 #define SECURITY_H
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 // ### CONSTANTS ###
 // Must match arr_token[] in messages.idl's JoinRequest
 #define SECURITY_TOKEN_LEN   32
 // Must match arr_cipher[] in messages.idl's Input, Position, CellClaimed
 // and GameState. security_encrypt() refuses to run if a payload wouldn't
-// fit (12-byte IV + plaintext + 16-byte GCM tag)
+// fit (8-byte sequence number + 12-byte IV + plaintext + 16-byte GCM tag)
 #define SECURITY_CIPHERTEXT_LEN 64
-#define SECURITY_MAX_CIPHER_OVERHEAD 32
+#define SECURITY_MAX_CIPHER_OVERHEAD 36
+// Most DDS key/session fields one ciphertext can be bound to
+#define SECURITY_MAX_BOUND 4
+
+// Which message a ciphertext belongs to. Part of the GCM associated data,
+// so a ciphertext copied from one message type into another (eg a Position
+// into a CellClaimed) fails to decrypt
+typedef enum
+{
+	SECURITY_MSG_JOIN_RESPONSE = 1,
+	SECURITY_MSG_INPUT,
+	SECURITY_MSG_POSITION,
+	SECURITY_MSG_CELL_CLAIMED,
+	SECURITY_MSG_GAME_STATE
+} SecurityMsgType;
+
+// Receiver-side replay state for one stream of messages (eg one player's
+// Position instance). Zero-initialise ({0}) for a stream nothing has been
+// received on yet. security_decrypt() only accepts a sequence number
+// higher than the last one it authenticated for this stream
+typedef struct
+{
+	bool b_seen;
+	uint64_t uint_last_seq;
+} SecurityReplayGuard;
 
 // ### AUTHENTICATION ###
 
@@ -60,19 +90,34 @@ bool security_verify_client_token(int a_int_nonce, const char *token);
 // Encrypts in_len bytes from in into out. out must be at least
 // in_len + SECURITY_MAX_CIPHER_OVERHEAD bytes. Writes the ciphertext
 // length to out_len. Each call uses a fresh random IV, so encrypting the
-// same plaintext twice never produces the same ciphertext.
-// Used by server.c before publishing Position/CellClaimed/GameState
-// samples and by client.c before publishing Input samples.
-bool security_encrypt(const unsigned char *in, size_t in_len,
-                       unsigned char *out, size_t *out_len);
+// same plaintext twice never produces the same ciphertext, and a fresh
+// sequence number (strictly increasing within this process, and seeded
+// from the clock so a restarted process keeps counting upwards).
+// The ciphertext is bound to a_type and the a_num_bound values in
+// a_arr_bound (the sample's DDS key fields, plus any session value such as
+// a join nonce): decrypting with a different type or bound values fails.
+// Those values are authenticated but not encrypted, so they can stay in
+// the clear where DDS needs them for routing.
+// Used by server.c before publishing Position/CellClaimed/GameState/
+// JoinResponse samples and by client.c before publishing Input samples.
+bool security_encrypt(SecurityMsgType a_type, const int *a_arr_bound,
+                       size_t a_num_bound, const unsigned char *in,
+                       size_t in_len, unsigned char *out, size_t *out_len);
 
 // Decrypts in_len bytes from in into out, which holds out_cap bytes.
-// Returns false if the data was tampered with, used the wrong key, is
-// longer than SECURITY_CIPHERTEXT_LEN, decrypts to more than out_cap bytes,
-// or is otherwise not authentic - callers must treat a false return as
-// "drop this message", not as equivalent to receiving nothing. out is only
-// written once the data has been authenticated.
-bool security_decrypt(const unsigned char *in, size_t in_len,
+// a_type/a_arr_bound/a_num_bound must be the values the sender passed to
+// security_encrypt(), rebuilt from the received sample. If a_guard is not
+// NULL, the message is also rejected unless its sequence number is higher
+// than the last one accepted on a_guard, which is then advanced.
+// Returns false if the data was tampered with, used the wrong key, type or
+// bound values, is a replay, is longer than SECURITY_CIPHERTEXT_LEN,
+// decrypts to more than out_cap bytes, or is otherwise not authentic -
+// callers must treat a false return as "drop this message", not as
+// equivalent to receiving nothing. out and a_guard are only written once
+// the data has been authenticated.
+bool security_decrypt(SecurityMsgType a_type, const int *a_arr_bound,
+                       size_t a_num_bound, SecurityReplayGuard *a_guard,
+                       const unsigned char *in, size_t in_len,
                        unsigned char *out, size_t out_cap, size_t *out_len);
 
 #endif // SECURITY_H
