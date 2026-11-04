@@ -16,12 +16,9 @@ OpenSSL's libcrypto (security.c's actual crypto implementation):
 
 (or just `make test_security` / `make test`, which already link libcrypto)
 
-Scope: only security.c is covered here, because it is the one module with
-no DDS/GLFW dependency and no main() of its own. detect_collision() in
-server.c is NOT covered: server.c needs messages.h (DDS-generated) to even
-compile, and already defines its own main(), so it can't be linked against
-this test's main() without first being pulled out into its own DDS-free
-module (eg collision.h/.c) - worth doing if that coverage is wanted later. */
+Scope: only security.c is covered here. The game rules (collision,
+spawning, movement) and the grid rules (claiming, scores, winner, timer)
+have their own tests in test_game_logic.c and test_grid_logic.c. */
 
 #include <stdio.h>
 #include <stdlib.h>

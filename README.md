@@ -37,11 +37,12 @@ by hand.)
 | `messages.idl` | DDS message/topic definitions |
 | `messages.h`, `messages.c` | Generated from `messages.idl` by `idlc` - not committed (`.gitignore`), rebuilt by `make` |
 | `server.c` | DDS server - owns the authoritative game state |
-| `client.c` | DDS client - one per player, renders the game and sends input |
+| `client.c` | DDS client - one per player: joins, sends input, mirrors the game state and runs the window |
+| `render.h`, `render.c` | Client rendering - draws a frame (floor, players, HUD, notices, end screen) with OpenGL from a snapshot of the client's state |
 | `game_logic.h`, `game_logic.c` | Pure game-rule logic (collision, spawn, movement) - no DDS/GLFW, unit-tested |
 | `grid_logic.h`, `grid_logic.c` | Pure "color the floor" rules (cell claiming, scores, winner, round timer) - no DDS/GLFW, unit-tested |
 | `security.h`, `security.c` | Pre-shared-key client auth + AES-256-GCM DDS-payload encryption (OpenSSL EVP), wired into server/client |
-| `stb_easy_font.h` | Vendored third-party font renderer (draws player labels) |
+| `stb_easy_font.h` | Vendored third-party font renderer (used by `render.c` for all text) |
 | `test_security.c`, `test_game_logic.c`, `test_grid_logic.c` | Unit tests - build with plain `gcc`, no other deps |
 | `Makefile` | `make`, `make test`, `make clean` |
 

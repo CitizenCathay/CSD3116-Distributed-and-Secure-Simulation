@@ -7,10 +7,11 @@
 \par Assignment: Week 1 Team Lab
 \date 11/02/2026 (MM/DD/YYYY)
 \brief DDS game client: joins the server, sends the arrow-key input, mirrors the
-       server's game state, and renders the grid, players and HUD with
-       OpenGL/GLFW.
+       server's game state, and runs the GLFW window, handing each frame
+       to render.c to draw with OpenGL.
 *******************************************************************************/
-/* gcc client.c security.c game_logic.c grid_logic.c messages.c -o client $(pkg-config --cflags --libs glfw3) -lGL $(pkg-config --cflags --libs CycloneDDS) -pthread -lm*/
+/* gcc -O2 client.c render.c security.c game_logic.c grid_logic.c messages.c -o client $(pkg-config --cflags --libs glfw3) -lGL $(pkg-config --cflags --libs CycloneDDS) $(pkg-config --cflags --libs libcrypto) -pthread -lm
+(or just `make client`) */
 
 /* Lecture slide references in this file are to "CSD3116 Week 01 Team Lab"
 (Dr Khoo Teck Ping): Slide 7 baseline programs, Slide 8 setting up (GLFW,
@@ -30,8 +31,6 @@ Slide 12 threading, Slide 14 tasks. */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <time.h>
-#include <math.h>
 #include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
@@ -40,9 +39,7 @@ Slide 12 threading, Slide 14 tasks. */
 #include "security.h"
 #include "game_logic.h"
 #include "grid_logic.h"
-#include "stb_easy_font.h"
-
-#define STB_EASY_FONT_IMPLEMENTATION
+#include "render.h"
 
 #define MAX_SAMPLES 1
 
@@ -53,16 +50,6 @@ Slide 12 threading, Slide 14 tasks. */
 
 // Target time per rendered frame (60 frames per second)
 #define FRAME_SECS (1.0 / 60.0)
-
-// One RGB colour per player, indexed by player ID minus 1
-static const float arr_colors[MAX_PLAYERS][3] =
-{
-	{ 0.90f, 0.20f, 0.20f },
-	{ 0.20f, 0.45f, 0.90f },
-	{ 0.20f, 0.70f, 0.30f },
-	{ 0.95f, 0.75f, 0.10f },
-	{ 0.65f, 0.30f, 0.80f }
-};
 
 // ### GLOBAL VARIABLES ###
 int int_player_id = -1;
@@ -103,18 +90,7 @@ static void on_quit_signal(int a_int_signal)
 	g_quit_requested = 1;
 }
 
-// "Player N left" messages shown briefly on screen
-#define MAX_NOTICES 3
-#define NOTICE_SECS 4.0
-#define NOTICE_FADE_SECS 0.5
-
-typedef struct
-{
-	int int_player_id;   // 0 = empty slot
-	double d_time;       // glfwGetTime() when the player left
-} LeaveNotice;
-
-// Written by the worker thread, drawn by the main thread. Guarded by mutex
+// "Player N left" messages (LeaveNotice, see render.h). Written by the worker thread, drawn by the main thread. Guarded by mutex
 static LeaveNotice arr_notices[MAX_NOTICES];
 
 // Records that a_int_player_id just left, reusing an empty slot or else
@@ -146,397 +122,6 @@ static dds_entity_t wake_guard = 0;
 // Guards the variables shared by the main (rendering) thread and the DDS
 // worker thread. Every lock must be matched by an unlock (Slide 12)
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-
-void draw_text(float x, float y, float scale, const char *text)
-{
-    // stb_easy_font silently stops drawing once this buffer is full, and each
-    // character needs a few hundred bytes - 4096 cut off strings of about 22
-    // characters (eg "Player 2 left the game"), so leave plenty of room
-    char buffer[16384];
-
-    int num_quads = stb_easy_font_print(
-        0, 0,
-        (char *)text,
-        NULL,
-        buffer,
-        sizeof(buffer)
-    );
-
-    glPushMatrix();
-
-    glTranslatef(x, y, 0.0f);
-    glScalef(scale, scale, 1.0f);
-
-    glEnableClientState(GL_VERTEX_ARRAY);
-
-    glVertexPointer(2, GL_FLOAT, 16, buffer);
-    glDrawArrays(GL_QUADS, 0, num_quads * 4);
-
-    glDisableClientState(GL_VERTEX_ARRAY);
-
-    glPopMatrix();
-}
-
-// ### DRAWING HELPERS ###
-// All drawing is in window pixels, origin top-left (see glOrtho in main).
-// Blending is enabled once at start-up, so every colour here takes an alpha.
-
-static const float arr_white[3] = { 1.0f, 1.0f, 1.0f };
-static const float arr_alarm[3] = { 1.0f, 0.35f, 0.35f };
-
-// How long a newly claimed cell takes to pop in, in seconds
-#define CLAIM_ANIM_SECS 0.25f
-
-// Per-cell animation state: the owner last drawn, and seconds since that
-// owner changed. Only used by the main (rendering) thread
-static int arr_shown_owner[GRID_ROWS * GRID_COLS];
-static float arr_claim_age[GRID_ROWS * GRID_COLS];
-
-// Fills a rectangle with the current colour
-static void draw_rect(float a_f_x, float a_f_y, float a_f_w, float a_f_h)
-{
-	glBegin(GL_QUADS);
-		glVertex2f(a_f_x, a_f_y);
-		glVertex2f(a_f_x, a_f_y + a_f_h);
-		glVertex2f(a_f_x + a_f_w, a_f_y + a_f_h);
-		glVertex2f(a_f_x + a_f_w, a_f_y);
-	glEnd();
-}
-
-// Outlines a rectangle with the current colour and line width
-static void draw_rect_outline(float a_f_x, float a_f_y, float a_f_w, float a_f_h)
-{
-	glBegin(GL_LINE_LOOP);
-		glVertex2f(a_f_x, a_f_y);
-		glVertex2f(a_f_x, a_f_y + a_f_h);
-		glVertex2f(a_f_x + a_f_w, a_f_y + a_f_h);
-		glVertex2f(a_f_x + a_f_w, a_f_y);
-	glEnd();
-}
-
-// Text with a soft drop shadow, so it reads on any background
-static void draw_label(float a_f_x, float a_f_y, float a_f_scale,
-	const float *a_arr_rgb, float a_f_alpha, const char *a_str_text)
-{
-	glColor4f(0.0f, 0.0f, 0.0f, a_f_alpha * 0.6f);
-	draw_text(a_f_x + a_f_scale, a_f_y + a_f_scale, a_f_scale, a_str_text);
-	glColor4f(a_arr_rgb[0], a_arr_rgb[1], a_arr_rgb[2], a_f_alpha);
-	draw_text(a_f_x, a_f_y, a_f_scale, a_str_text);
-}
-
-// Same as draw_label(), but centred horizontally on a_f_cx
-static void draw_label_centered(float a_f_cx, float a_f_y, float a_f_scale,
-	const float *a_arr_rgb, float a_f_alpha, const char *a_str_text)
-{
-	float f_width = stb_easy_font_width((char *)a_str_text) * a_f_scale;
-	draw_label(a_f_cx - f_width / 2.0f, a_f_y, a_f_scale, a_arr_rgb,
-		a_f_alpha, a_str_text);
-}
-
-// Faint grid lines, plus every claimed cell as a tile in its owner's colour.
-// A tile that has just changed hands grows in from its centre with a
-// brief white flash
-static void draw_cells(const Grid *a_grid, float a_f_dt)
-{
-	glColor4f(1.0f, 1.0f, 1.0f, 0.06f);
-	glBegin(GL_LINES);
-	for (int int_col = 0; int_col <= GRID_COLS; int_col++)
-	{
-		glVertex2f(int_col * SQ_WIDTH, PLAY_TOP);
-		glVertex2f(int_col * SQ_WIDTH, PLAY_TOP + PLAY_HEIGHT);
-	}
-	for (int int_row = 0; int_row <= GRID_ROWS; int_row++)
-	{
-		glVertex2f(0, PLAY_TOP + int_row * SQ_WIDTH);
-		glVertex2f(WIDTH, PLAY_TOP + int_row * SQ_WIDTH);
-	}
-	glEnd();
-
-	for (int int_row = 0; int_row < GRID_ROWS; int_row++)
-	{
-		for (int int_col = 0; int_col < GRID_COLS; int_col++)
-		{
-			int int_i = int_row * GRID_COLS + int_col;
-			int int_owner = a_grid->arr_owner[int_i];
-
-			// Restart the pop-in whenever the owner changes
-			if (int_owner != arr_shown_owner[int_i])
-			{
-				arr_shown_owner[int_i] = int_owner;
-				arr_claim_age[int_i] = 0.0f;
-			}
-			else if (arr_claim_age[int_i] < CLAIM_ANIM_SECS)
-			{
-				arr_claim_age[int_i] += a_f_dt;
-			}
-
-			if (int_owner < 1 || int_owner > MAX_PLAYERS)
-				continue;
-
-			float f_t = arr_claim_age[int_i] / CLAIM_ANIM_SECS;
-			if (f_t > 1.0f)
-				f_t = 1.0f;
-			// Ease out: fast at first, settling at the end
-			float f_ease = 1.0f - (1.0f - f_t) * (1.0f - f_t);
-			float f_inset = 2.0f + (1.0f - f_ease) * (SQ_WIDTH / 2 - 2);
-			float f_flash = (1.0f - f_ease) * 0.6f;
-
-			const float *arr_c = arr_colors[int_owner - 1];
-			glColor4f(0.8f * arr_c[0] + f_flash * (1.0f - 0.8f * arr_c[0]),
-				0.8f * arr_c[1] + f_flash * (1.0f - 0.8f * arr_c[1]),
-				0.8f * arr_c[2] + f_flash * (1.0f - 0.8f * arr_c[2]), 1.0f);
-			draw_rect(int_col * SQ_WIDTH + f_inset, PLAY_TOP + int_row * SQ_WIDTH + f_inset,
-				SQ_WIDTH - 2.0f * f_inset, SQ_WIDTH - 2.0f * f_inset);
-		}
-	}
-}
-
-// Each active player's square: shadow, fill, highlight, outline and ID.
-// The local player gets a pulsing outline and a YOU marker
-static void draw_players(const Player a_arr_players[], int a_int_own_id,
-	double a_d_time)
-{
-	float f_pulse = 0.5f + 0.5f * sinf((float)a_d_time * 6.0f);
-
-	for (int i = 0; i < MAX_PLAYERS; i++)
-	{
-		if (!a_arr_players[i].b_active)
-			continue;
-
-		float f_x = (float)a_arr_players[i].x;
-		float f_y = (float)a_arr_players[i].y;
-		bool b_own = (i + 1 == a_int_own_id);
-
-		glColor4f(0.0f, 0.0f, 0.0f, 0.45f);
-		draw_rect(f_x + 4.0f, f_y + 4.0f, SQ_WIDTH, SQ_WIDTH);
-
-		glColor3fv(arr_colors[i]);
-		draw_rect(f_x, f_y, SQ_WIDTH, SQ_WIDTH);
-
-		glColor4f(1.0f, 1.0f, 1.0f, 0.25f);
-		draw_rect(f_x, f_y, SQ_WIDTH, 6.0f);
-
-		if (b_own)
-		{
-			glLineWidth(3.0f);
-			glColor4f(1.0f, 1.0f, 1.0f, 0.7f + 0.3f * f_pulse);
-		}
-		else
-		{
-			glLineWidth(2.0f);
-			glColor4f(1.0f, 1.0f, 1.0f, 0.45f);
-		}
-		draw_rect_outline(f_x, f_y, SQ_WIDTH, SQ_WIDTH);
-		glLineWidth(1.0f);
-
-		char str_id[2];
-		snprintf(str_id, sizeof(str_id), "%d", i + 1);
-		draw_label_centered(f_x + SQ_WIDTH / 2.0f, f_y + SQ_WIDTH / 2.0f - 10.0f,
-			3.0f, arr_white, 1.0f, str_id);
-
-		if (b_own)
-		{
-			// Above the square, or below it when there is not enough room
-			// above to clear the top HUD margin (PLAY_TOP)
-			bool b_room_above = (f_y - PLAY_TOP) > 16.0f;
-			float f_marker_y = b_room_above ? f_y - 16.0f : f_y + SQ_WIDTH + 4.0f;
-			draw_label_centered(f_x + SQ_WIDTH / 2.0f, f_marker_y, 1.5f,
-				arr_white, 1.0f, "YOU");
-		}
-	}
-}
-
-// Top strip (who you are, countdown, time bar) and bottom strip
-// (territory bar, per-player cell counts)
-static void draw_hud(const Grid *a_grid, const Player a_arr_players[],
-	int a_int_own_id, int a_int_secs, bool a_b_started, double a_d_time,
-	bool a_b_spectating)
-{
-	char str_text[32];
-	bool b_low = a_b_started && a_int_secs <= 10;
-	float f_blink = 0.65f + 0.35f * sinf((float)a_d_time * 8.0f);
-
-	// Top strip - exactly HUD_MARGIN_TOP tall (solid bar + the thin time
-	// bar below it), so it can never bleed into the playable grid
-	glColor4f(0.0f, 0.0f, 0.0f, 0.55f);
-	draw_rect(0, 0, WIDTH, HUD_MARGIN_TOP - 4);
-
-	if (a_int_own_id >= 1 && a_int_own_id <= MAX_PLAYERS)
-	{
-		snprintf(str_text, sizeof(str_text), "Player %d", a_int_own_id);
-		draw_label(12, 14, 2.5f, arr_colors[a_int_own_id - 1], 1.0f, str_text);
-	}
-	else if (a_b_spectating)
-	{
-		draw_label(12, 14, 2.5f, arr_white, 0.9f, "Spectator");
-	}
-	else
-	{
-		draw_label(12, 14, 2.5f, arr_white, 0.7f, "Connecting...");
-	}
-
-	snprintf(str_text, sizeof(str_text), "%d:%02d", a_int_secs / 60, a_int_secs % 60);
-	draw_label_centered(WIDTH / 2.0f, 8, 4.0f, b_low ? arr_alarm : arr_white,
-		b_low ? f_blink : 1.0f, str_text);
-
-	float f_title_w = stb_easy_font_width((char *)"COLOR THE FLOOR") * 1.5f;
-	draw_label(WIDTH - 12 - f_title_w, 18, 1.5f, arr_white, 0.5f, "COLOR THE FLOOR");
-
-	// Time bar: drains as the round runs out
-	float f_frac = a_b_started ? (float)a_int_secs / ROUND_SECS : 1.0f;
-	glColor4f(1.0f, 1.0f, 1.0f, 0.1f);
-	draw_rect(0, HUD_MARGIN_TOP - 4, WIDTH, 4);
-	if (b_low)
-		glColor4f(arr_alarm[0], arr_alarm[1], arr_alarm[2], f_blink);
-	else
-		glColor4f(1.0f, 1.0f, 1.0f, 0.8f);
-	draw_rect(0, HUD_MARGIN_TOP - 4, WIDTH * f_frac, 4);
-
-	// Count each player's cells once, for both the bar and the labels
-	int arr_counts[MAX_PLAYERS];
-	for (int i = 0; i < MAX_PLAYERS; i++)
-		arr_counts[i] = grid_count_owned(a_grid, i + 1);
-
-	// Bottom strip - exactly HUD_MARGIN_BOTTOM tall, for the same reason
-	// as the top strip above
-	glColor4f(0.0f, 0.0f, 0.0f, 0.55f);
-	draw_rect(0, HEIGHT - HUD_MARGIN_BOTTOM, WIDTH, HUD_MARGIN_BOTTOM);
-
-	// Territory bar: each player's share of the whole floor
-	float f_bar_x = 10.0f;
-	float f_bar_w = WIDTH - 20.0f;
-	float f_bar_y = HEIGHT - HUD_MARGIN_BOTTOM + 4.0f;
-	glColor4f(1.0f, 1.0f, 1.0f, 0.1f);
-	draw_rect(f_bar_x, f_bar_y, f_bar_w, 10);
-	float f_cursor = f_bar_x;
-	for (int i = 0; i < MAX_PLAYERS; i++)
-	{
-		float f_seg = f_bar_w * arr_counts[i] / (GRID_COLS * GRID_ROWS);
-		glColor3fv(arr_colors[i]);
-		draw_rect(f_cursor, f_bar_y, f_seg, 10);
-		f_cursor += f_seg;
-	}
-
-	// Per-player label: colour swatch + cells owned
-	int int_slot = 0;
-	for (int i = 0; i < MAX_PLAYERS; i++)
-	{
-		if (!a_arr_players[i].b_active)
-			continue;
-
-		float f_x = 10.0f + int_slot * 150.0f;
-		float f_y = HEIGHT - HUD_MARGIN_BOTTOM + 22.0f;
-		glColor3fv(arr_colors[i]);
-		draw_rect(f_x, f_y, 12, 12);
-		snprintf(str_text, sizeof(str_text), "P%d  %d", i + 1, arr_counts[i]);
-		draw_label(f_x + 18.0f, f_y, 1.7f, arr_white, 1.0f, str_text);
-		int_slot++;
-	}
-}
-
-// Pulsing message shown until enough players have joined
-static void draw_waiting(double a_d_time)
-{
-	float f_alpha = 0.55f + 0.45f * sinf((float)a_d_time * 3.0f);
-	draw_label_centered(WIDTH / 2.0f, 280, 3.0f, arr_white, f_alpha,
-		"Waiting for another player...");
-}
-
-// Dims the floor and shows the result and final cell counts on a panel
-static void draw_end_screen(const Grid *a_grid, const Player a_arr_players[],
-	int a_int_own_id, int a_int_winner_id)
-{
-	glColor4f(0.0f, 0.0f, 0.0f, 0.7f);
-	draw_rect(0, 0, WIDTH, HEIGHT);
-
-	float f_panel_x = (WIDTH - 500) / 2.0f;
-	float f_panel_y = 170.0f;
-	bool b_has_winner = (a_int_winner_id >= 1 && a_int_winner_id <= MAX_PLAYERS);
-	const float *arr_accent = b_has_winner ? arr_colors[a_int_winner_id - 1] : arr_white;
-
-	glColor4f(0.10f, 0.11f, 0.16f, 0.96f);
-	draw_rect(f_panel_x, f_panel_y, 500, 260);
-	glColor3fv(arr_accent);
-	draw_rect(f_panel_x, f_panel_y, 500, 8);
-
-	char str_text[64];
-	if (!b_has_winner)
-		snprintf(str_text, sizeof(str_text), "DRAW!");
-	else if (a_int_winner_id == a_int_own_id)
-		snprintf(str_text, sizeof(str_text), "YOU WIN!");
-	else
-		snprintf(str_text, sizeof(str_text), "PLAYER %d WINS!", a_int_winner_id);
-	draw_label_centered(WIDTH / 2.0f, f_panel_y + 30.0f, 5.0f, arr_accent, 1.0f, str_text);
-
-	int int_line = 0;
-	for (int i = 0; i < MAX_PLAYERS; i++)
-	{
-		if (!a_arr_players[i].b_active)
-			continue;
-
-		float f_y = f_panel_y + 105.0f + int_line * 28.0f;
-		glColor3fv(arr_colors[i]);
-		draw_rect(f_panel_x + 120.0f, f_y, 16, 16);
-		snprintf(str_text, sizeof(str_text), "Player %d   %d cells", i + 1,
-			grid_count_owned(a_grid, i + 1));
-		draw_label(f_panel_x + 150.0f, f_y + 1.0f, 2.5f, arr_white, 1.0f, str_text);
-		int_line++;
-	}
-}
-
-// Small banners under the top bar announcing who left, fading out after
-// NOTICE_SECS. Newer banners sit lower in the stack
-static void draw_notices(const LeaveNotice a_arr_notices[], double a_d_now)
-{
-	int int_row = 0;
-	for (int i = 0; i < MAX_NOTICES; i++)
-	{
-		int int_id = a_arr_notices[i].int_player_id;
-		double d_age = a_d_now - a_arr_notices[i].d_time;
-		if (int_id < 1 || int_id > MAX_PLAYERS || d_age < 0.0 || d_age >= NOTICE_SECS)
-			continue;
-
-		float f_alpha = 1.0f;
-		if (d_age > NOTICE_SECS - NOTICE_FADE_SECS)
-			f_alpha = (float)((NOTICE_SECS - d_age) / NOTICE_FADE_SECS);
-
-		char str_text[32];
-		snprintf(str_text, sizeof(str_text), "Player %d left the game", int_id);
-		float f_text_w = stb_easy_font_width((char *)str_text) * 2.0f;
-		float f_w = f_text_w + 44.0f;
-		float f_x = (WIDTH - f_w) / 2.0f;
-		float f_y = 58.0f + int_row * 32.0f;
-
-		glColor4f(0.0f, 0.0f, 0.0f, 0.7f * f_alpha);
-		draw_rect(f_x, f_y, f_w, 26.0f);
-		glColor4f(arr_colors[int_id - 1][0], arr_colors[int_id - 1][1],
-			arr_colors[int_id - 1][2], f_alpha);
-		draw_rect(f_x + 8.0f, f_y + 6.0f, 14.0f, 14.0f);
-		draw_label(f_x + 30.0f, f_y + 6.0f, 2.0f, arr_white, f_alpha, str_text);
-		int_row++;
-	}
-}
-
-// Banner for a client refused a slot because the game is full: it can still
-// watch, and joins automatically when a player leaves
-static void draw_spectator_banner(double a_d_time)
-{
-	static const float arr_amber[3] = { 1.0f, 0.8f, 0.3f };
-	const char *str_title = "GAME FULL - SPECTATING";
-	const char *str_sub = "You will join automatically when a spot opens";
-
-	float f_alpha = 0.75f + 0.25f * sinf((float)a_d_time * 3.0f);
-	float f_title_w = stb_easy_font_width((char *)str_title) * 3.0f;
-	float f_sub_w = stb_easy_font_width((char *)str_sub) * 1.5f;
-	float f_w = (f_title_w > f_sub_w ? f_title_w : f_sub_w) + 40.0f;
-	// Sits just above the bottom strip
-	float f_y = HEIGHT - 56.0f - 62.0f - 8.0f;
-
-	glColor4f(0.0f, 0.0f, 0.0f, 0.75f);
-	draw_rect((WIDTH - f_w) / 2.0f, f_y, f_w, 62.0f);
-	draw_label_centered(WIDTH / 2.0f, f_y + 8.0f, 3.0f, arr_amber, f_alpha, str_title);
-	draw_label_centered(WIDTH / 2.0f, f_y + 40.0f, 1.5f, arr_white, 0.9f, str_sub);
-}
 
 // Sends one Input for a_int_player_id: the arrow-key direction, or 'n' for
 // none. Used both for real moves and for the first "hello" Input.
@@ -945,7 +530,6 @@ void *worker(void *arg)
 
 	JoinRequest request;
 	memset(&request, 0, sizeof(request));
-	request.b_dummy = true;
 	// Tag the request, so only the response to it is accepted, and so the
 	// server can bind our Input to it - see security.h
 	request.int_nonce = security_make_nonce();
@@ -1050,6 +634,40 @@ static void wake_worker(void)
 		dds_set_guardcondition(guard, true);
 }
 
+// ### MAIN THREAD ###
+
+// Reads the arrow keys: the direction of the first one held, or 'n' for none.
+// The keys only reach the window once it has been clicked (Slide 7)
+static char read_direction(GLFWwindow *a_window)
+{
+	if (glfwGetKey(a_window, GLFW_KEY_UP) == GLFW_PRESS)
+		return 'u';
+	if (glfwGetKey(a_window, GLFW_KEY_DOWN) == GLFW_PRESS)
+		return 'd';
+	if (glfwGetKey(a_window, GLFW_KEY_LEFT) == GLFW_PRESS)
+		return 'l';
+	if (glfwGetKey(a_window, GLFW_KEY_RIGHT) == GLFW_PRESS)
+		return 'r';
+	return 'n';
+}
+
+// Copies everything one frame draws out of the shared state, under one
+// lock, so the frame is drawn without holding it
+static void snapshot_state(RenderState *out_state)
+{
+	pthread_mutex_lock(&mutex);
+	out_state->grid = grid;
+	memcpy(out_state->arr_players, arr_Players, sizeof(out_state->arr_players));
+	memcpy(out_state->arr_notices, arr_notices, sizeof(out_state->arr_notices));
+	out_state->int_own_id = int_player_id;
+	out_state->int_seconds_left = int_seconds_left;
+	out_state->b_round_started = b_round_started;
+	out_state->b_spectating = b_spectating;
+	out_state->b_game_over = b_game_over;
+	out_state->int_winner_id = int_winner_id;
+	pthread_mutex_unlock(&mutex);
+}
+
 // Entry point of the application
 int main(void)
 {
@@ -1067,67 +685,44 @@ int main(void)
 	// The main thread does OpenGL rendering and GLFW input handling, while
 	// this worker thread does the DDS traffic (Slide 12)
 	pthread_t thread;
+	if (pthread_create(&thread, NULL, worker, NULL) != 0)
+	{
+		perror("pthread_create");
+		return 1;
+	}
 
-    if (pthread_create(&thread, NULL, worker, NULL) != 0)
-    {
-        perror("pthread_create");
-        return 1;
-    }
-    
-    
 	// GLFW opens the 800x600 window and reads the keyboard, and OpenGL draws
 	// into it (Slides 7 and 8)
-    if (!glfwInit())
-        return 1;
+	if (!glfwInit())
+		return 1;
 
-    GLFWwindow *window =
-        glfwCreateWindow(WIDTH, HEIGHT, "DDS Client (Click within the window to control)", NULL, NULL);
+	GLFWwindow *window = glfwCreateWindow(WIDTH, HEIGHT,
+		"DDS Client (Click within the window to control)", NULL, NULL);
+	if (!window)
+	{
+		glfwTerminate();
+		return 1;
+	}
 
-    if (!window)
-    {
-        glfwTerminate();
-        return 1;
-    }
-
-    glfwMakeContextCurrent(window);
+	glfwMakeContextCurrent(window);
 	// Wait for the display refresh instead of redrawing as fast as possible
 	glfwSwapInterval(1);
-	// Alpha blending for the translucent overlays and fades
-	glEnable(GL_BLEND);
-	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    /* Use pixel coordinates */
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    /* glOrtho(0, WIDTH, 0, HEIGHT, -1, 1); */
-	glOrtho(0, WIDTH, HEIGHT, 0, -1, 1);
-
-  /*   glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity(); */
+	render_init();
 
 	double d_last_frame = glfwGetTime();
 	// Direction last handed to the worker thread, so the shared ch_dir is
 	// only locked and the worker only woken when a key actually changes,
 	// not on every frame
 	char ch_last_dir = 'n';
+	RenderState state;
 
-    while (!glfwWindowShouldClose(window) && !g_quit_requested)
-    {
-		 /* Process keyboard/window events */
-        glfwPollEvents();
+	while (!glfwWindowShouldClose(window) && !g_quit_requested)
+	{
+		// Process keyboard/window events
+		glfwPollEvents();
 
-		/* Non-blocking keyboard input: the arrow keys move the player's square
-		once the window has been clicked (Slide 7) */
-		char ch_new_dir = 'n';
-		if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS)
-			ch_new_dir = 'u';
-		else if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS)
-			ch_new_dir = 'd';
-		else if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS)
-			ch_new_dir = 'l';
-		else if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS)
-			ch_new_dir = 'r';
-
+		// Non-blocking keyboard input: the arrow keys move the player's square
+		char ch_new_dir = read_direction(window);
 		if (ch_new_dir != ch_last_dir)
 		{
 			ch_last_dir = ch_new_dir;
@@ -1142,37 +737,10 @@ int main(void)
 		float f_dt = (float)(d_now - d_last_frame);
 		d_last_frame = d_now;
 
-		glClearColor(0.07f, 0.08f, 0.12f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
+		snapshot_state(&state);
+		render_frame(&state, f_dt, d_now);
+		glfwSwapBuffers(window);
 
-		// Take a consistent copy of the shared state under one lock, then
-		// draw from it without holding the lock
-		pthread_mutex_lock(&mutex);
-		Grid grid_snap = grid;
-		Player arr_players_snap[MAX_PLAYERS];
-		memcpy(arr_players_snap, arr_Players, sizeof(arr_players_snap));
-		LeaveNotice arr_notices_snap[MAX_NOTICES];
-		memcpy(arr_notices_snap, arr_notices, sizeof(arr_notices_snap));
-		int int_own_snap = int_player_id;
-		int int_secs_snap = int_seconds_left;
-		bool b_started_snap = b_round_started;
-		bool b_spectating_snap = b_spectating;
-		bool b_over_snap = b_game_over;
-		int int_winner_snap = int_winner_id;
-		pthread_mutex_unlock(&mutex);
-
-		draw_cells(&grid_snap, f_dt);
-		draw_players(arr_players_snap, int_own_snap, d_now);
-		draw_hud(&grid_snap, arr_players_snap, int_own_snap, int_secs_snap,
-			b_started_snap, d_now, b_spectating_snap);
-		draw_notices(arr_notices_snap, d_now);
-		if (b_spectating_snap)
-			draw_spectator_banner(d_now);
-		if (!b_started_snap)
-			draw_waiting(d_now);
-		if (b_over_snap)
-			draw_end_screen(&grid_snap, arr_players_snap, int_own_snap, int_winner_snap);
-        glfwSwapBuffers(window);
 		// Cap at about 60 frames per second; vsync is not always honoured
 		// (eg software rendering under WSL), which leaves the loop spinning.
 		// Only sleep for what is left of this frame's budget - a flat 16 ms
@@ -1181,9 +749,9 @@ int main(void)
 		double d_frame_left = FRAME_SECS - (glfwGetTime() - d_now);
 		if (d_frame_left > 0.0)
 			usleep((useconds_t)(d_frame_left * 1e6));
-    }
+	}
 
-    // Tell the worker thread to finish and wait for it, so DDS is shut down
+	// Tell the worker thread to finish and wait for it, so DDS is shut down
 	// cleanly - that is what lets the server notice we left
 	pthread_mutex_lock(&mutex);
 	b_running = false;
@@ -1191,9 +759,9 @@ int main(void)
 	wake_worker();
 	pthread_join(thread, NULL);
 
-    glfwDestroyWindow(window);
-    glfwTerminate();
+	glfwDestroyWindow(window);
+	glfwTerminate();
 
-    security_cleanup();
-    return 0;
+	security_cleanup();
+	return 0;
 }

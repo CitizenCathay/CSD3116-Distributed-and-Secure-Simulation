@@ -5,7 +5,6 @@
 
 struct JoinRequest
 {
-	boolean b_dummy;
 	// Random per-client value, echoed back in JoinResponse so each client
 	// can tell its own response from the ones meant for other clients
 	long int_nonce;
