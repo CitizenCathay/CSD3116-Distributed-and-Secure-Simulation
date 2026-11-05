@@ -20,7 +20,7 @@ make            # builds server + client (runs idlc for you)
 ./client        # terminal 2, 3, ... one per player
 ```
 
-Click inside a client window, then use the **arrow keys**. Close the window
+Click inside a client window, then use the **arrow keys**. **F11** (or Alt+Enter) toggles fullscreen and **ESC** leaves it. Close the window
 (or press Ctrl+C) to leave.
 
 ```bash
