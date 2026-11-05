@@ -328,3 +328,29 @@ Text still uses the vendored `stb_easy_font.h`; PNGs are read with
 - "How is the security aspect of the game?"
 - "How is the cross-machine connection?"
 - "What else can be added for optimization / security?"
+
+### How the AI-assisted code was tested
+
+**Avoiding many tiny allocations (`security.c`).** `security_encrypt` and
+`security_decrypt` used to create and free an OpenSSL cipher context
+(`EVP_CIPHER_CTX_new` / `EVP_CIPHER_CTX_free`) for every message, which is a
+malloc and a free per message. Following Week 9 page 5 ("avoid many tiny
+allocations"), each thread now keeps one encrypt context and one decrypt
+context (`_Thread_local`), created on first use, reused for every later
+message, and freed when the thread exits. The message format, the
+authentication and the replay protection are unchanged. The AI suggested this
+change, the team reviewed it and kept it.
+
+**How it was tested.**
+- `test_security` (`make test`, 42 checks) still passes. It covers round trips,
+  tampered, truncated, oversized and forged ciphertexts, message-type and key
+  binding, replays and key overrides.
+- An 8-thread stress test (20,000 encrypt, decrypt and tamper-rejection rounds
+  per thread) had 0 failures and was clean under AddressSanitizer,
+  UndefinedBehaviorSanitizer (with leak checking) and ThreadSanitizer. This
+  checks that the reused contexts leak nothing and have no data races.
+- Valgrind counted the heap allocations in that test: 1,447,053 before and
+  967,068 after, about 33% fewer (one fewer per encrypt or decrypt).
+
+
+
