@@ -56,4 +56,8 @@ void render_init(void);
 // glfwGetTime(), for pulses, blinks and fading notices
 void render_frame(const RenderState *a_state, float a_f_dt, double a_d_now);
 
+// ID of the player allowed to start the round from the lobby (the lowest
+// active ID), or 0 if nobody has joined. The server applies the same rule
+int render_host_id(const Player a_arr_players[]);
+
 #endif // RENDER_H

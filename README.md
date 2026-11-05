@@ -4,9 +4,9 @@ A real-time, distributed and secure multiplayer game for **CSD3116** (Week 1
 Team Lab). Players move squares around a grid and claim every floor cell they
 walk over. Built in C on Cyclone DDS, OpenGL/GLFW and OpenSSL.
 
-- A **60 s round** starts once **2 players** have joined (up to 5).
+- Players gather in a **lobby** (up to 5). Once **2 players** have joined, the host (the lowest player number, so Player 1) presses **ENTER** to start a **60 s round**.
 - Walk over a cell to paint it your colour, even if someone else painted it first.
-- When time runs out, **most cells wins**. A new round starts 5 s later.
+- When time runs out, **most cells wins**. After 5 s everyone returns to the lobby, where the host starts the next round.
 - A 6th player **spectates** and joins automatically when a slot frees up.
 
 ## Quick start
@@ -36,14 +36,15 @@ make clean      # remove binaries and generated files
 |---|---|---|
 | **Programs** | `server.c` | Authoritative game server |
 | | `client.c` | One per player: networking, input, main loop |
-| | `render.c` / `.h` | Client drawing (OpenGL) from a state snapshot |
+| | `render.c` / `.h` | Client drawing (OpenGL) from a state snapshot; art comes from `assets/` |
+| **Art** | `assets/*.png` | All sprites and backdrops - see "Art assets" below |
 | **Shared logic** | `game_logic.c` / `.h` | Players: collision, spawning, movement |
 | | `grid_logic.c` / `.h` | Floor: cell claiming, scores, winner, timer |
 | **Security** | `security.c` / `.h` | Authentication and encryption (OpenSSL) |
 | **Messages** | `messages.idl` | DDS message definitions (`idlc` generates `messages.c/.h`) |
 | **Tests** | `test_*.c` | Unit tests for the shared logic and security |
 | **Build** | `Makefile` | `make`, `make test`, `make clean` |
-| **Vendored** | `stb_easy_font.h` | Text rendering |
+| **Vendored** | `stb_easy_font.h`, `stb_image.h` | Text rendering; PNG loading (public domain, from github.com/nothings/stb) |
 
 The shared logic and security modules have **no DDS or GLFW dependency**, so
 they are unit-tested on their own and used unchanged by both programs.
@@ -243,3 +244,37 @@ Measured on WSL2, both builds at `-O2`, against the code before this pass
 
 ThreadSanitizer found no data races in the game code. The client's total CPU
 rises slightly because it now draws about 12% more frames.
+
+
+---
+
+## Art assets
+
+The client's art is not hardcoded: `render.c` loads PNGs from the `assets/`
+folder at start-up, so you can restyle the game by painting over them. Run the
+client from the repository root (or set `CTF_ASSET_DIR` to the folder). A
+missing file is reported on stderr and drawn as a blank white shape, so the
+game still runs.
+
+Most images are **white or grey on purpose**: the game tints them with each
+player's colour, so one image covers all five players. Keep the file names and
+sizes, and keep the transparent corners transparent.
+
+| File | Size | Used for |
+|---|---|---|
+| `tile.png` | 64x64 | A claimed floor cell, bevel included (owner colour) |
+| `floor.png` | 64x64 | An unclaimed floor cell (faint white) |
+| `player.png` | 64x64 | A player's square (player colour) |
+| `eye.png`, `pupil.png` | 32x32 | The faces on the squares (not tinted) |
+| `crown.png` | 64x48 | Leader / winner / host crown (not tinted) |
+| `panel.png`, `ring.png` | 64x64 | Rounded panels and their outlines; stretched as a 9-slice with 16 px corners |
+| `circle.png` | 64x64 | Dots, swatches, spinner (any colour) |
+| `soft.png` | 64x64 | Blurred blob used as drop shadow and glow |
+| `spark.png` | 64x64 | Sparks and dust puffs (player colour) |
+| `confetti.png` | 16x16 | Confetti (any colour) |
+| `background.png` | 4x256 | Backdrop gradient, stretched over the window |
+| `vignette.png` | 64x4 | Edge darkening, left to right |
+| `hud_bar.png` | 4x64 | Top and bottom HUD strips |
+
+Text still uses the vendored `stb_easy_font.h`; PNGs are read with
+`stb_image.h`.

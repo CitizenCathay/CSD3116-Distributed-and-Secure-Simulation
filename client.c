@@ -114,6 +114,9 @@ static void push_leave_notice(int a_int_player_id)
 
 // Direction - n means no direction. Guarded by mutex
 char ch_dir = 'n';
+// Set by the main thread when the host presses ENTER in the lobby; the worker
+// turns it into one 's' Input and clears it. Guarded by mutex
+static bool b_start_requested = false;
 // Guard condition in the worker thread's waitset. The main thread triggers
 // it (wake_worker()) when ch_dir or b_running changes, so the worker sleeps
 // until there is something to do instead of polling. 0 until the worker
@@ -616,6 +619,12 @@ void *worker(void *arg)
 		bool b_keep_running = b_running;
 		int int_player_id_temp = int_player_id;
 		char ch_dir_temp = ch_dir;
+		bool b_start_temp = false;
+		if (int_player_id != -1)
+		{
+			b_start_temp = b_start_requested;
+			b_start_requested = false;
+		}
 		pthread_mutex_unlock(&mutex);
 		// Stop once the main thread says the window has closed
 		if (!b_keep_running)
@@ -647,6 +656,9 @@ void *worker(void *arg)
 				publish_input(dds.input_writer, int_player_id_temp, request.int_nonce, 'n');
 				b_sent_hello = true;
 			}
+			// The host started the round from the lobby
+			if (b_start_temp)
+				publish_input(dds.input_writer, int_player_id_temp, request.int_nonce, 's');
 			// Throttle a held key to one move per MOVE_REPEAT_MSECS, so the
 			// square steps one grid cell at a time instead of blurring
 			// across several. Done by timestamp, not by sleeping, so
@@ -789,6 +801,7 @@ int main(void)
 	// not on every frame
 	char ch_last_dir = 'n';
 	RenderState state;
+	bool b_start_key_prev = false;
 
 	while (!glfwWindowShouldClose(window) && !g_quit_requested)
 	{
@@ -812,6 +825,22 @@ int main(void)
 		d_last_frame = d_now;
 
 		snapshot_state(&state);
+
+		// ENTER or SPACE starts the round - only offered to the host in the
+		// lobby; the server checks again, this just avoids pointless traffic
+		bool b_start_key = glfwGetKey(window, GLFW_KEY_ENTER) == GLFW_PRESS ||
+			glfwGetKey(window, GLFW_KEY_KP_ENTER) == GLFW_PRESS ||
+			glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS;
+		if (b_start_key && !b_start_key_prev && !state.b_round_started &&
+			state.int_own_id >= 1 && state.int_own_id == render_host_id(state.arr_players))
+		{
+			pthread_mutex_lock(&mutex);
+			b_start_requested = true;
+			pthread_mutex_unlock(&mutex);
+			wake_worker();
+		}
+		b_start_key_prev = b_start_key;
+
 		render_frame(&state, f_dt, d_now);
 		glfwSwapBuffers(window);
 

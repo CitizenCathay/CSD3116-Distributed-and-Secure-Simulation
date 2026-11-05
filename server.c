@@ -46,7 +46,7 @@ watch out for break out of loop */
 // ### GLOBAL CONSTANTS ###
 /* An array of one message (aka sample in dds terms) will be used. */
 #define MAX_SAMPLES 1
-// The round starts once this many players have joined
+// The host can only start the round once this many players have joined
 #define MIN_PLAYERS 2
 // How long the result stays on screen before a new round starts
 // automatically - no need to restart the server to play again
@@ -387,6 +387,8 @@ typedef struct
 	dds_time_t start_time;
 	dds_time_t game_over_time;
 	dds_time_t last_state_time;
+	// The host pressed start in the lobby. Consumed by update_round()
+	bool b_start_requested;
 } Round;
 
 // Creates a topic, exiting if that fails
@@ -625,6 +627,22 @@ static void take_inputs(const ServerDds *a_dds, Round *a_round)
 		// of being freed by FIRST_INPUT_TIMEOUT_SECS
 		arr_b_input_seen[int_input_player_id - 1] = true;
 
+		// 's' = start the round. Only the host (the lowest active player ID)
+		// may, and only from the lobby; anyone else's request is ignored
+		if (ch_input_dir == 's')
+		{
+			int int_host = 0;
+			for (int i = 0; i < MAX_PLAYERS && int_host == 0; i++)
+			{
+				if (arr_Players[i].b_active)
+					int_host = i + 1;
+			}
+			if (!a_round->b_started && int_input_player_id == int_host)
+				a_round->b_start_requested = true;
+			pthread_mutex_unlock(&mutex);
+			continue;
+		}
+
 		// Compute the move and apply it if legal - see game_logic.h (a
 		// square may not leave the window or overlap another player's
 		// square, Slide 7). Players are frozen once the round is over
@@ -678,11 +696,16 @@ static void update_round(const ServerDds *a_dds, Round *a_round)
 {
 	dds_time_t now = dds_time();
 
-	// Start the round once enough players have joined
+	// Start the round when the host asked for it and enough players are
+	// still here. A request that cannot be honoured is dropped, so it never
+	// fires later by surprise
 	pthread_mutex_lock(&mutex);
 	int int_num_active_temp = int_num_active_players;
 	pthread_mutex_unlock(&mutex);
-	if (!a_round->b_started && int_num_active_temp >= MIN_PLAYERS)
+	bool b_start_now = a_round->b_start_requested && !a_round->b_started &&
+		int_num_active_temp >= MIN_PLAYERS;
+	a_round->b_start_requested = false;
+	if (b_start_now)
 	{
 		a_round->b_started = true;
 		a_round->start_time = now;
