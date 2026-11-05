@@ -308,3 +308,23 @@ sizes, and keep the transparent corners transparent.
 
 Text still uses the vendored `stb_easy_font.h`; PNGs are read with
 `stb_image.h`.
+
+---
+
+## AI use declaration
+
+**Tool used:** Claude Code (Anthropic).
+### What AI was used for
+
+| Area | What the AI did | Files |
+|---|---|---|
+| Security review | Read `security.c`, `security.h` and `server.c` and summarised what the authentication and encryption cover and what they do not (the shared-key limitation). No code was changed for this | none |
+| Optimization | Added one reusable AES-GCM cipher context per thread (`_Thread_local`, freed at thread exit) in place of creating and freeing a context for every message. Added `-pthread` to the `test_security` and `tools/%` Makefile rules | `security.c`, `Makefile` |
+| Advice only | Suggested further hardening and optimization ideas from the course slides (sanitizer builds, compiler hardening flags, join rate-limiting). These are suggestions and are **not** implemented unless listed above | none |
+
+
+### Prompts used (summary)
+
+- "How is the security aspect of the game?"
+- "How is the cross-machine connection?"
+- "What else can be added for optimization / security?"
