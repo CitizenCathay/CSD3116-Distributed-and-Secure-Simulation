@@ -10,7 +10,7 @@
        server's game state, and runs the GLFW window, handing each frame
        to render.c to draw with OpenGL.
 *******************************************************************************/
-/* gcc -O2 client.c render.c security.c game_logic.c grid_logic.c messages.c -o client $(pkg-config --cflags --libs glfw3) -lGL $(pkg-config --cflags --libs CycloneDDS) $(pkg-config --cflags --libs libcrypto) -pthread -lm
+/* gcc -O2 client.c render.c security.c game_logic.c grid_logic.c net_config.c messages.c -o client $(pkg-config --cflags --libs glfw3) -lGL $(pkg-config --cflags --libs CycloneDDS) $(pkg-config --cflags --libs libcrypto) -pthread -lm
 (or just `make client`) */
 
 /* Lecture slide references in this file are to "CSD3116 Week 01 Team Lab"
@@ -37,6 +37,7 @@ Slide 12 threading, Slide 14 tasks. */
 #include "dds/dds.h"
 #include "messages.h"
 #include "security.h"
+#include "net_config.h"
 #include "game_logic.h"
 #include "grid_logic.h"
 #include "render.h"
@@ -899,11 +900,22 @@ static void toggle_fullscreen(GLFWwindow *a_window)
 }
 
 // Entry point of the application
-int main(void)
+// Usage: ./client [server address ...] - the address is only needed on
+// networks that block DDS's own discovery (see net_config.h)
+int main(int argc, char **argv)
 {
 	if (!security_init())
 	{
 		fprintf(stderr, "security_init failed\n");
+		return 1;
+	}
+
+	// Fixed ports and any peer addresses, for playing across machines -
+	// see net_config.h. Must run before the worker thread creates its DDS
+	// participant
+	if (!net_config_apply(argc - 1, argv + 1))
+	{
+		fprintf(stderr, "usage: %s [server address ...]\n", argv[0]);
 		return 1;
 	}
 

@@ -28,6 +28,34 @@ make test       # unit tests
 make clean      # remove binaries and generated files
 ```
 
+### Playing across machines
+
+Put the machines on the same network, then:
+
+```bash
+./server                    # machine A
+./client <machine A's IP>   # machine B (find A's IP with `ip addr`)
+```
+
+The address is optional on networks where DDS finds peers by itself
+(multicast). Many phone hotspots and school networks block that, and then
+the client needs the server's address; the server never does.
+
+**On WSL**, other machines cannot reach WSL until you do this once on every
+machine:
+
+1. Mirrored networking, so WSL uses the machine's real IP. In PowerShell,
+   then restart WSL with `wsl --shutdown`:
+   ```powershell
+   Set-Content "$env:USERPROFILE\.wslconfig" "[wsl2]`nnetworkingMode=mirrored"
+   ```
+2. Let DDS's ports through WSL's firewall. In PowerShell **as administrator**:
+   ```powershell
+   New-NetFirewallHyperVRule -Name "CSD3116-DDS" -DisplayName "CSD3116 DDS" -Direction Inbound -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -Protocol UDP -LocalPorts 7400-7500 -Action Allow
+   ```
+
+The game always uses UDP ports 7400-7451, so that rule is all it needs.
+
 ---
 
 ## Project structure
@@ -41,12 +69,13 @@ make clean      # remove binaries and generated files
 | **Shared logic** | `game_logic.c` / `.h` | Players: collision, spawning, movement |
 | | `grid_logic.c` / `.h` | Floor: cell claiming, scores, winner, timer |
 | **Security** | `security.c` / `.h` | Authentication and encryption (OpenSSL) |
+| **Networking** | `net_config.c` / `.h` | DDS ports and optional peer addresses for playing across machines |
 | **Messages** | `messages.idl` | DDS message definitions (`idlc` generates `messages.c/.h`) |
 | **Tests** | `test_*.c` | Unit tests for the shared logic and security |
 | **Build** | `Makefile` | `make`, `make test`, `make clean` |
 | **Vendored** | `stb_easy_font.h`, `stb_image.h` | Text rendering; PNG loading (public domain, from github.com/nothings/stb) |
 
-The shared logic and security modules have **no DDS or GLFW dependency**, so
+The shared logic, security and networking modules have **no DDS calls or GLFW dependency**, so
 they are unit-tested on their own and used unchanged by both programs.
 
 ---
@@ -178,6 +207,7 @@ Plain C with a small `TEST_ASSERT` macro, no test framework. No DDS, GLFW or
 | `test_game_logic` | 18 (30 checks) | Collision edges and overlaps, free-slot search, spawning in bounds without overlap, moves in every direction, window and HUD borders, grid alignment |
 | `test_grid_logic` | 15 (42 checks) | Cell under a square (centre, corners, clamping), claiming and stealing cells, running score counts, winner and draws, round timer |
 | `test_security` | 21 (42 checks) | Join token accepted/rejected/bound to nonce, encrypt/decrypt round trip, tampered, truncated, oversized and forged ciphertexts, message-type and key binding, replays, key override from environment |
+| `test_net_config` | 5 (16 checks) | Peer addresses accepted/rejected (including XML injection), fixed ports always set, every peer listed, bad input and small buffers refused |
 
 Each suite prints how many checks passed and exits non-zero on any failure.
 

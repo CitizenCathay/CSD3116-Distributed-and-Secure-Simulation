@@ -10,7 +10,7 @@
        positions and the grid of claimed cells), runs the round timer and
        publishes updates to the clients.
 *******************************************************************************/
-/* gcc -O2 -o server server.c security.c game_logic.c grid_logic.c messages.c $(pkg-config --cflags --libs CycloneDDS) $(pkg-config --cflags --libs libcrypto) -pthread
+/* gcc -O2 -o server server.c security.c game_logic.c grid_logic.c net_config.c messages.c $(pkg-config --cflags --libs CycloneDDS) $(pkg-config --cflags --libs libcrypto) -pthread
 (or just `make server`) */
 
 /* Dr Khoo Teck Ping
@@ -40,6 +40,7 @@ watch out for break out of loop */
 #include "dds/dds.h"
 #include "messages.h"
 #include "security.h"
+#include "net_config.h"
 #include "game_logic.h"
 #include "grid_logic.h"
 
@@ -962,7 +963,9 @@ static void *wait_for_quit(void *arg)
 }
 
 // Entry point of the application
-int main(void)
+// Usage: ./server [peer address ...] - addresses are only needed on networks
+// that block DDS's own discovery (see net_config.h)
+int main(int argc, char **argv)
 {
 	// Seed rand(), so that the random numbers are different for each run
 	srand((unsigned int)time(NULL));
@@ -970,6 +973,14 @@ int main(void)
 	if (!security_init())
 	{
 		fprintf(stderr, "security_init failed\n");
+		return 1;
+	}
+
+	// Fixed ports and any peer addresses, for playing across machines -
+	// see net_config.h. Must run before any thread creates a DDS entity
+	if (!net_config_apply(argc - 1, argv + 1))
+	{
+		fprintf(stderr, "usage: %s [peer address ...]\n", argv[0]);
 		return 1;
 	}
 
