@@ -35,7 +35,7 @@ client: client.c render.c render.h stb_image.h security.c game_logic.c grid_logi
 		$(CFLAGS_CRYPTO) $(LIBS_CRYPTO) -pthread -lm
 
 test_security: test_security.c security.c
-	$(CC) $(CFLAGS) test_security.c security.c -o test_security $(CFLAGS_CRYPTO) $(LIBS_CRYPTO)
+	$(CC) $(CFLAGS) test_security.c security.c -o test_security $(CFLAGS_CRYPTO) $(LIBS_CRYPTO) -pthread
 
 test_game_logic: test_game_logic.c game_logic.c
 	$(CC) $(CFLAGS) test_game_logic.c game_logic.c -o test_game_logic
@@ -56,7 +56,7 @@ tools: $(TOOLS)
 
 tools/%: tools/%.c security.c messages.c messages.h
 	$(CC) $(CFLAGS) -I. $< security.c messages.c -o $@ \
-		$(CFLAGS_DDS) $(LIBS_DDS) $(CFLAGS_CRYPTO) $(LIBS_CRYPTO)
+		$(CFLAGS_DDS) $(LIBS_DDS) $(CFLAGS_CRYPTO) $(LIBS_CRYPTO) -pthread
 
 # Join/replay/late-joiner/shutdown checks against the real server (~1 min)
 integration: server tools
