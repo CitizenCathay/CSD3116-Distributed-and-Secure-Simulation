@@ -841,8 +841,16 @@ int main(void)
 		}
 		b_start_key_prev = b_start_key;
 
-		render_frame(&state, f_dt, d_now);
-		glfwSwapBuffers(window);
+		// Window resized, maximised or fullscreen: fit the game inside it.
+		// A minimised window reports 0x0 - nothing to draw until it returns
+		int int_fb_w = 0, int_fb_h = 0;
+		glfwGetFramebufferSize(window, &int_fb_w, &int_fb_h);
+		if (int_fb_w > 0 && int_fb_h > 0)
+		{
+			render_set_viewport(int_fb_w, int_fb_h);
+			render_frame(&state, f_dt, d_now);
+			glfwSwapBuffers(window);
+		}
 
 		// Cap at about 60 frames per second; vsync is not always honoured
 		// (eg software rendering under WSL), which leaves the loop spinning.

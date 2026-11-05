@@ -1270,8 +1270,33 @@ void render_init(void)
 		arr_tex[i] = load_texture(str_dir, arr_tex_files[i]);
 }
 
+// Letterboxed viewport: the whole game scaled uniformly to fit, centred
+static int int_vp_x = 0, int_vp_y = 0, int_vp_w = WIDTH, int_vp_h = HEIGHT;
+
+void render_set_viewport(int a_int_fb_w, int a_int_fb_h)
+{
+	if (a_int_fb_w <= 0 || a_int_fb_h <= 0)
+		return;
+	float f_scale = (float)a_int_fb_w / WIDTH;
+	if ((float)a_int_fb_h / HEIGHT < f_scale)
+		f_scale = (float)a_int_fb_h / HEIGHT;
+	int_vp_w = (int)(WIDTH * f_scale);
+	int_vp_h = (int)(HEIGHT * f_scale);
+	int_vp_x = (a_int_fb_w - int_vp_w) / 2;
+	int_vp_y = (a_int_fb_h - int_vp_h) / 2;
+}
+
 void render_frame(const RenderState *a_state, float a_f_dt, double a_d_now)
 {
+	// Bars first (the clear covers the whole window), then the game inside
+	// its letterboxed viewport
+	glDisable(GL_SCISSOR_TEST);
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT);
+	glViewport(int_vp_x, int_vp_y, int_vp_w, int_vp_h);
+	glEnable(GL_SCISSOR_TEST);
+	glScissor(int_vp_x, int_vp_y, int_vp_w, int_vp_h);
+
 	// A stalled frame (window drag, breakpoint) must not fling the
 	// animations forward
 	if (a_f_dt > 0.1f)

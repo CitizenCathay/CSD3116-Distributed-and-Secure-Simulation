@@ -51,6 +51,11 @@ typedef struct
 // blending. Call once, after the GLFW window's context is made current
 void render_init(void);
 
+// Tells the renderer the window's current framebuffer size in pixels (from
+// glfwGetFramebufferSize), so a resized, maximised or fullscreen window shows
+// the 800x600 game scaled to fit with black bars, instead of a corner
+void render_set_viewport(int a_int_fb_w, int a_int_fb_h);
+
 // Clears the window and draws one frame of a_state. a_f_dt is the seconds
 // since the previous frame (drives the cell pop-in animation); a_d_now is
 // glfwGetTime(), for pulses, blinks and fading notices
