@@ -25,12 +25,12 @@ all: server client
 messages.h messages.c: messages.idl
 	$(IDLC) -l c messages.idl
 
-server: server.c security.c game_logic.c grid_logic.c messages.c
-	$(CC) $(CFLAGS) -o server server.c security.c game_logic.c grid_logic.c messages.c \
+server: server.c security.c game_logic.c grid_logic.c net_config.c messages.c
+	$(CC) $(CFLAGS) -o server server.c security.c game_logic.c grid_logic.c net_config.c messages.c \
 		$(CFLAGS_DDS) $(LIBS_DDS) $(CFLAGS_CRYPTO) $(LIBS_CRYPTO) -pthread
 
-client: client.c render.c render.h security.c game_logic.c grid_logic.c messages.c
-	$(CC) $(CFLAGS) client.c render.c security.c game_logic.c grid_logic.c messages.c -o client \
+client: client.c render.c render.h security.c game_logic.c grid_logic.c net_config.c messages.c
+	$(CC) $(CFLAGS) client.c render.c security.c game_logic.c grid_logic.c net_config.c messages.c -o client \
 		$(CFLAGS_GLFW) -lGL $(LIBS_GLFW) $(CFLAGS_DDS) $(LIBS_DDS) \
 		$(CFLAGS_CRYPTO) $(LIBS_CRYPTO) -pthread -lm
 
@@ -43,10 +43,14 @@ test_game_logic: test_game_logic.c game_logic.c
 test_grid_logic: test_grid_logic.c grid_logic.c game_logic.c
 	$(CC) $(CFLAGS) test_grid_logic.c grid_logic.c game_logic.c -o test_grid_logic
 
-test: test_security test_game_logic test_grid_logic
+test_net_config: test_net_config.c net_config.c net_config.h
+	$(CC) $(CFLAGS) test_net_config.c net_config.c -o test_net_config
+
+test: test_security test_game_logic test_grid_logic test_net_config
 	./test_security
 	./test_game_logic
 	./test_grid_logic
+	./test_net_config
 
 tools: $(TOOLS)
 
@@ -65,6 +69,6 @@ bench:
 	bash tools/compare.sh
 
 clean:
-	rm -f server client test_security test_game_logic test_grid_logic messages.h messages.c
+	rm -f server client test_security test_game_logic test_grid_logic test_net_config messages.h messages.c
 	rm -f $(TOOLS)
 	rm -rf build
