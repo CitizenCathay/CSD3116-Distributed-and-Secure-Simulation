@@ -10,6 +10,7 @@ client
 test_security
 test_game_logic
 test_grid_logic
+test_net_config
 *.o
 tools/bench
 tools/join_test

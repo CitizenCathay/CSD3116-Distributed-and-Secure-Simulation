@@ -26,10 +26,12 @@ build() {
 	local dir=$1
 	cd "$dir"
 	idlc -l c messages.idl 2> /dev/null
-	gcc $FLAGS -o server server.c security.c game_logic.c grid_logic.c messages.c \
-		$LIBS_DDS $LIBS_CRYPTO -pthread
-	# render.c only exists from the render split onwards
-	local client_src="client.c security.c game_logic.c grid_logic.c messages.c"
+	# Later versions add files - net_config.c (cross-machine play) and
+	# render.c (render split) - so build with whichever exist
+	local common="security.c game_logic.c grid_logic.c messages.c"
+	[ -f net_config.c ] && common="$common net_config.c"
+	gcc $FLAGS -o server server.c $common $LIBS_DDS $LIBS_CRYPTO -pthread
+	local client_src="client.c $common"
 	[ -f render.c ] && client_src="$client_src render.c"
 	gcc $FLAGS -o client $client_src $LIBS_GLFW -lGL $LIBS_DDS $LIBS_CRYPTO -pthread -lm
 	gcc $FLAGS -I. -o bench "$ROOT/tools/bench.c" security.c messages.c $LIBS_DDS $LIBS_CRYPTO
