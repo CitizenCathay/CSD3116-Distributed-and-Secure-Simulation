@@ -869,6 +869,10 @@ void *worker(void *arg)
 	// Deleting the participant removes our writers, so every client sees
 	// the server's Position/CellClaimed instances lose their writer at once
 	dds_delete(dds.participant);
+	
+	// Free the sample buffers create_dds() allocated, again xd
+	JoinRequest_free(dds.ptr_join_sample, DDS_FREE_ALL);
+	Input_free(dds.ptr_input_sample, DDS_FREE_ALL);
 	return NULL;
 }
 

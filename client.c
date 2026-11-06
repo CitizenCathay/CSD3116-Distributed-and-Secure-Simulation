@@ -706,6 +706,12 @@ void *worker(void *arg)
 	// Deleting the participant removes our writers, which is how the server
 	// learns we left: our Input instance goes not-alive (see server.c)
 	dds_delete(dds.participant);
+
+	// Free the sample buffers create_dds() allocated :P
+	JoinResponse_free(dds.ptr_response_sample, DDS_FREE_ALL);
+	Position_free(dds.ptr_position_sample, DDS_FREE_ALL);
+	CellClaimed_free(dds.ptr_cell_sample, DDS_FREE_ALL);
+	GameState_free(dds.ptr_state_sample, DDS_FREE_ALL);
 	return NULL;
 }
 

@@ -107,11 +107,18 @@ static int join(dds_entity_t a_join_writer, dds_entity_t a_response_reader, int 
 					(unsigned char *)arr_plain, sizeof(arr_plain), &plain_len) &&
 					plain_len == sizeof(arr_plain) && arr_plain[1] == a_int_nonce &&
 					arr_plain[0] > 0)
+				{
+					// must be set freeee
+					JoinResponse_free(samples[0], DDS_FREE_ALL);
 					return arr_plain[0];
+				}
 			}
 			dds_sleepfor(DDS_MSECS(5));
 		}
 	}
+
+	// this too set them free.
+	JoinResponse_free(samples[0], DDS_FREE_ALL);
 	return -1;
 }
 

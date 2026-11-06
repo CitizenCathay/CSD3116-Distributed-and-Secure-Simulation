@@ -172,7 +172,7 @@ time.
 ```mermaid
 stateDiagram-v2
     [*] --> Waiting
-    Waiting --> Running: 2+ players joined
+    Waiting --> Running: host presses ENTER (2+ players)
     Running --> Over: timer hits 0
     Over --> Waiting: after 5 s (cells cleared, players respawned)
 ```
@@ -220,6 +220,7 @@ Headless DDS clients that run against the real server, no windows needed:
 | `make integration` | ~1 min of PASS/FAIL checks: repeated joins get the same slot, silent slots are freed, replayed input is ignored, late joiners see the right players, Ctrl+C shuts the server down cleanly |
 | `make bench` | Builds the pre-optimization commit and the current code side by side in `build/`, then measures both (latency, CPU per thread) |
 | `bash tools/load.sh build/new 20` | Puts a running server under a fixed load (4 idle players + 1 moving) for 20 s, eg while `perf record` or `strace -c` runs |
+| `make sanitize` | Rebuilds everything with AddressSanitizer + UndefinedBehaviorSanitizer, runs the unit and integration tests, and prints how many sanitizer reports were found (details in `sanitizer-logs/`). Removes the sanitized builds afterwards |
 
 To profile, build both versions with symbols (`bash tools/build_versions.sh`
 does this by default), start `build/old/server` or `build/new/server` under
@@ -275,6 +276,23 @@ Measured on WSL2, both builds at `-O2`, against the code before this pass
 ThreadSanitizer found no data races in the game code. The client's total CPU
 rises slightly because it now draws about 12% more frames.
 
+### Final build profiling
+
+Measured on the final build (lobby and new graphics) on WSL2, against the same before commit (`5c982eb`). Raw results are in `profiling/`.
+
+| Metric | Tool | Before | After |
+|---|---|---|---|
+| Key press → new position, 2 players | `make bench` | 50.2 ms | **1.2 ms** |
+| Key press → new position, 5 players | `make bench` | 153.6 ms | **1.2 ms** |
+| Server CPU, 5 idle players | `make bench` | 1.8% | **0.2%** |
+| Server wake-ups per second | `perf stat` (context switches) | 863 | **27** |
+| Messages sent, same 5-player test | Wireshark (`rtps` filter) | 1358 | **584** |
+| Client CPU, frame cap + vsync off vs on | `top` | 517% | **174%** |
+
+- Client CPU is measured on the final graphics with only the frame cap and vsync changed. 100% = one CPU core. The new renderer costs more than the old one (about 13% → 189% with the cap on) because it sends hundreds of separate draw calls per frame.
+- The Wireshark captures were taken before the lobby was added. The server sends messages the same way since.
+- `-O3` gave no measurable gain over `-O2`, because the server spends its time waiting on the network.
+- `make sanitize` found DDS sample buffers that were allocated once and never freed, in `server.c`, `client.c`, `tools/bench.c` and `tools/late_joiner.c`. They are now freed, and `make sanitize` reports 0.
 
 ---
 
@@ -354,3 +372,22 @@ change, the team reviewed it and kept it.
 
 
 
+### Rachael: profiling, sanitizers and leak fix
+
+| Area | What the AI did | Files |
+|---|---|---|
+| Profiling | Planned the `make bench`, perf, Wireshark and frame cap on/off tests and helped read the results. Rachael ran every test and measurement | `profiling/` |
+| Leak fix | Traced the ASan leak reports to DDS sample buffers that were never freed and added the matching `_free(..., DDS_FREE_ALL)` calls | `server.c`, `client.c`, `tools/bench.c`, `tools/late_joiner.c` |
+| Find and fix | Found that the client rule was missing `net_config.c` after the regine-3 merge | `Makefile` |
+
+Prompts used (summary):
+- "Go through all the files and the assignment. What do I have to do?"
+- "How do I get the perf before/after numbers and the Wireshark graph?"
+- "What if I test it without the frame cap and vsync?"
+- "Do we not need to fix what make sanitize found?"
+
+How it was tested:
+- `make test` (130 checks) and `make integration` pass with the changes.
+- `make sanitize` reports 0. Before the fix it found 6 leak reports, all from the buffers above.
+- The tests open no window, so they don't cover the `client.c` fix. The game was played after the change to check it still starts, plays and closes normally.
+- The `top` CPU method was checked on programs with a known load (1 busy thread read 97%, 4 threads read 399%), and it agrees with `tools/compare.sh`'s method.
