@@ -1,0 +1,16 @@
+# started on Thu Nov  5 10:38:01 2026
+
+
+ Performance counter stats for 'build/old/server':
+
+           5472.08 msec task-clock:u                     #    0.009 CPUs utilized             
+                 0      context-switches:u               #    0.000 /sec                      
+                 0      cpu-migrations:u                 #    0.000 /sec                      
+               590      page-faults:u                    #  107.820 /sec                      
+
+     593.239675762 seconds time elapsed
+
+       2.851536000 seconds user
+       7.632469000 seconds sys
+
+

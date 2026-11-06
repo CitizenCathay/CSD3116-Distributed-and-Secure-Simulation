@@ -1,0 +1,24 @@
+===== old =====
+  2 players, key press -> new position (40 moves):
+    moves=40 blocked=0  latency ms: mean=50.4 median=49.5 p95=50.7 max=86.8
+  5 players, key press -> new position (40 moves):
+    moves=40 blocked=0  latency ms: mean=152.1 median=153.7 p95=154.5 max=154.7
+  5 players, nobody moving, server CPU over 10 s:
+    server main thread: 0.2% CPU
+    server worker thread: 0.5% CPU
+    server whole process: 0.7% CPU
+  client idle in a running game, CPU over 10 s:
+    client main thread: 2.6% CPU
+    client worker thread: 0.7% CPU
+    client whole process: 11.7% CPU
+===== new =====
+  2 players, key press -> new position (40 moves):
+    moves=40 blocked=0  latency ms: mean=0.8 median=0.9 p95=1.1 max=1.4
+  5 players, key press -> new position (40 moves):
+    moves=40 blocked=0  latency ms: mean=0.8 median=0.8 p95=1.0 max=1.0
+  5 players, nobody moving, server CPU over 10 s:
+    server main thread: 0.0% CPU
+    server whole process: 0.1% CPU
+  client idle in a running game, CPU over 10 s:
+    client main thread: 2.7% CPU
+    client whole process: 11.3% CPU

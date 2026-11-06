@@ -1,0 +1,16 @@
+# started on Thu Nov  5 10:47:42 2026
+
+
+ Performance counter stats for 'build/new/server':
+
+             30.97 msec task-clock:u                     #    0.001 CPUs utilized             
+                 0      context-switches:u               #    0.000 /sec                      
+                 0      cpu-migrations:u                 #    0.000 /sec                      
+               605      page-faults:u                    #   19.535 K/sec                     
+
+      29.465951016 seconds time elapsed
+
+       0.019087000 seconds user
+       0.019087000 seconds sys
+
+
