@@ -68,6 +68,7 @@ FIRST_INPUT_TIMEOUT_SECS frees it. */
 #include <string.h>
 #include <time.h>
 #include <stdatomic.h>
+#include <pthread.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -121,6 +122,53 @@ _Static_assert(GCM_OVERHEAD == SECURITY_MAX_CIPHER_OVERHEAD,
 // Next sequence number security_encrypt() hands out. Atomic, since the
 // client and server may both encrypt from more than one thread
 static _Atomic uint64_t g_uint_next_seq = 1;
+
+// One cipher context per thread and direction, created on first use and
+// reused for every later message, so the hot path does not malloc and free
+// a context per message (Week 9 pg 5: avoid many tiny allocations)
+// Thread-local, so no locking is needed. EVP_*Init_ex(ctx, cipher, ....)
+// fully re-initialises a context, so nothing carries over between messages
+// https://docs.openssl.org/3.0/man3/EVP_EncryptInit/
+//https://en.cppreference.com/c/language/storage_duration
+static _Thread_local EVP_CIPHER_CTX *t_ctx_enc = NULL;
+static _Thread_local EVP_CIPHER_CTX *t_ctx_dec = NULL;
+
+// Frees the calling thread's contexts. Runs automatically when a thread that
+// used them exits (via the pthread key below), and from security_cleanup()
+// for the thread that calls it (the main thread's key destructor never runs)
+static void free_thread_ctxs(void *a_unused)
+{
+	(void)a_unused;
+	EVP_CIPHER_CTX_free(t_ctx_enc);
+	EVP_CIPHER_CTX_free(t_ctx_dec);
+	t_ctx_enc = NULL;
+	t_ctx_dec = NULL;
+}
+
+//https://pubs.opengroup.org/onlinepubs/9699919799/functions/pthread_key_create.html 
+//https://pubs.opengroup.org/onlinepubs/9699919799/functions/pthread_once.html
+static pthread_key_t g_key_ctx_cleanup;
+static pthread_once_t g_once_ctx_key = PTHREAD_ONCE_INIT;
+
+static void make_ctx_key(void)
+{
+	pthread_key_create(&g_key_ctx_cleanup, free_thread_ctxs);
+}
+
+// Returns the calling thread's context from a_ptr_slot, creating it (and
+// arming the thread-exit cleanup) the first time. NULL if allocation fails
+static EVP_CIPHER_CTX *get_thread_ctx(EVP_CIPHER_CTX **a_ptr_slot)
+{
+	if (!*a_ptr_slot)
+	{
+		pthread_once(&g_once_ctx_key, make_ctx_key);
+		*a_ptr_slot = EVP_CIPHER_CTX_new();
+		// A non-NULL value is what makes the key's destructor run at exit
+		if (*a_ptr_slot)
+			pthread_setspecific(g_key_ctx_cleanup, (void *)1);
+	}
+	return *a_ptr_slot;
+}
 
 // Prefixed to the nonce before it is HMAC'd, so a join token can never be
 // mistaken for an HMAC computed for some other purpose under the same key
@@ -228,7 +276,9 @@ static bool make_join_mac(int a_int_nonce, unsigned char *out_mac)
 
 void security_cleanup(void)
 {
-	// Nothing was allocated by security_init()
+	// security_init() allocated nothing; release the calling thread's cached
+	// cipher contexts. Other threads free theirs when they exit
+	free_thread_ctxs(NULL);
 }
 
 void security_make_client_token(int a_int_nonce, char *out_token, size_t token_len)
@@ -285,7 +335,7 @@ bool security_encrypt(SecurityMsgType a_type, const int *a_arr_bound,
 	if (RAND_bytes(arr_iv, GCM_IV_LEN) != 1)
 		return false;
 
-	EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+	EVP_CIPHER_CTX *ctx = get_thread_ctx(&t_ctx_enc);
 	if (!ctx)
 		return false;
 
@@ -317,7 +367,7 @@ bool security_encrypt(SecurityMsgType a_type, const int *a_arr_bound,
 		}
 	}
 
-	EVP_CIPHER_CTX_free(ctx);
+	// ctx is the thread's cached context: kept, not freed
 	return b_ok;
 }
 
@@ -355,7 +405,7 @@ bool security_decrypt(SecurityMsgType a_type, const int *a_arr_bound,
 	unsigned char arr_tag[GCM_TAG_LEN];
 	memcpy(arr_tag, ptr_cipher + cipher_len, GCM_TAG_LEN);
 
-	EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+	EVP_CIPHER_CTX *ctx = get_thread_ctx(&t_ctx_dec);
 	if (!ctx)
 		return false;
 
@@ -399,6 +449,6 @@ bool security_decrypt(SecurityMsgType a_type, const int *a_arr_bound,
 	}
 
 	OPENSSL_cleanse(arr_scratch, sizeof(arr_scratch));
-	EVP_CIPHER_CTX_free(ctx);
+	// ctx is the thread's cached context: kept, not freed
 	return b_ok;
 }

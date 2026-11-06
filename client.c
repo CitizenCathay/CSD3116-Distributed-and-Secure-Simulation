@@ -10,7 +10,7 @@
        server's game state, and runs the GLFW window, handing each frame
        to render.c to draw with OpenGL.
 *******************************************************************************/
-/* gcc -O2 client.c render.c security.c game_logic.c grid_logic.c messages.c -o client $(pkg-config --cflags --libs glfw3) -lGL $(pkg-config --cflags --libs CycloneDDS) $(pkg-config --cflags --libs libcrypto) -pthread -lm
+/* gcc -O2 client.c render.c security.c game_logic.c grid_logic.c net_config.c messages.c -o client $(pkg-config --cflags --libs glfw3) -lGL $(pkg-config --cflags --libs CycloneDDS) $(pkg-config --cflags --libs libcrypto) -pthread -lm
 (or just `make client`) */
 
 /* Lecture slide references in this file are to "CSD3116 Week 01 Team Lab"
@@ -37,6 +37,7 @@ Slide 12 threading, Slide 14 tasks. */
 #include "dds/dds.h"
 #include "messages.h"
 #include "security.h"
+#include "net_config.h"
 #include "game_logic.h"
 #include "grid_logic.h"
 #include "render.h"
@@ -100,20 +101,23 @@ static void push_leave_notice(int a_int_player_id)
 	int int_slot = 0;
 	for (int i = 0; i < MAX_NOTICES; i++)
 	{
-		if (arr_notices[i].int_player_id == 0)
+		if (arr_notices[i].player_id == 0)
 		{
 			int_slot = i;
 			break;
 		}
-		if (arr_notices[i].d_time < arr_notices[int_slot].d_time)
+		if (arr_notices[i].left_at < arr_notices[int_slot].left_at)
 			int_slot = i;
 	}
-	arr_notices[int_slot].int_player_id = a_int_player_id;
-	arr_notices[int_slot].d_time = glfwGetTime();
+	arr_notices[int_slot].player_id = a_int_player_id;
+	arr_notices[int_slot].left_at = glfwGetTime();
 }
 
 // Direction - n means no direction. Guarded by mutex
 char ch_dir = 'n';
+// Set by the main thread when the host presses ENTER in the lobby; the worker
+// turns it into one 's' Input and clears it. Guarded by mutex
+static bool b_start_requested = false;
 // Guard condition in the worker thread's waitset. The main thread triggers
 // it (wake_worker()) when ch_dir or b_running changes, so the worker sleeps
 // until there is something to do instead of polling. 0 until the worker
@@ -616,6 +620,12 @@ void *worker(void *arg)
 		bool b_keep_running = b_running;
 		int int_player_id_temp = int_player_id;
 		char ch_dir_temp = ch_dir;
+		bool b_start_temp = false;
+		if (int_player_id != -1)
+		{
+			b_start_temp = b_start_requested;
+			b_start_requested = false;
+		}
 		pthread_mutex_unlock(&mutex);
 		// Stop once the main thread says the window has closed
 		if (!b_keep_running)
@@ -647,6 +657,9 @@ void *worker(void *arg)
 				publish_input(dds.input_writer, int_player_id_temp, request.int_nonce, 'n');
 				b_sent_hello = true;
 			}
+			// The host started the round from the lobby
+			if (b_start_temp)
+				publish_input(dds.input_writer, int_player_id_temp, request.int_nonce, 's');
 			// Throttle a held key to one move per MOVE_REPEAT_MSECS, so the
 			// square steps one grid cell at a time instead of blurring
 			// across several. Done by timestamp, not by sleeping, so
@@ -731,23 +744,178 @@ static void snapshot_state(RenderState *out_state)
 {
 	pthread_mutex_lock(&mutex);
 	out_state->grid = grid;
-	memcpy(out_state->arr_players, arr_Players, sizeof(out_state->arr_players));
-	memcpy(out_state->arr_notices, arr_notices, sizeof(out_state->arr_notices));
-	out_state->int_own_id = int_player_id;
-	out_state->int_seconds_left = int_seconds_left;
-	out_state->b_round_started = b_round_started;
-	out_state->b_spectating = b_spectating;
-	out_state->b_game_over = b_game_over;
-	out_state->int_winner_id = int_winner_id;
+	memcpy(out_state->players, arr_Players, sizeof(out_state->players));
+	memcpy(out_state->notices, arr_notices, sizeof(out_state->notices));
+	out_state->own_id = int_player_id;
+	out_state->seconds_left = int_seconds_left;
+	out_state->round_started = b_round_started;
+	out_state->spectating = b_spectating;
+	out_state->game_over = b_game_over;
+	out_state->winner_id = int_winner_id;
 	pthread_mutex_unlock(&mutex);
 }
 
+// ### GLFW WINDOW ###
+// Adapted from our CSD2401 game engine (csd2401f25_team_aviddivas):
+// glapp.cpp and glapp.h (GLApp: error callback, framebuffer-size callback,
+// ToggleFullscreen() that remembers the windowed position and size; original
+// authors pghali@digipen.edu and parminder.singh@digipen.edu) and Input.h
+// (key callback / one-frame key presses). Rewritten here in C.
+// The callbacks all run inside glfwPollEvents() on the main thread, so the
+// flags they set need no mutex
+
+static bool b_is_fullscreen = false;
+static int int_windowed_w = WIDTH;
+static int int_windowed_h = HEIGHT;
+static int int_windowed_x = 100;
+static int int_windowed_y = 100;
+
+// Set by key_cb, consumed (and cleared) once per frame by the main loop
+static bool b_start_pressed = false;
+static bool b_fullscreen_pressed = false;
+
+/*  _________________________________________________________________________ */
+/*! error_cb
+
+@param int
+GLFW error code
+
+@param const char*
+Human-readable description of the code
+
+@return none
+
+GLFW calls this when one of its functions fails, so a problem such as a
+window that cannot be created is reported instead of silently ignored.
+*/
+static void error_cb(int a_int_error, const char *a_str_description)
+{
+	(void)a_int_error;
+	fprintf(stderr, "GLFW error: %s\n", a_str_description);
+}
+
+/*  _________________________________________________________________________ */
+/*! fbsize_cb
+
+@param GLFWwindow*
+Window that was resized
+
+@param int
+New framebuffer width in pixels
+
+@param int
+New framebuffer height in pixels
+
+@return none
+
+Called whenever the window is resized, maximised or switched to fullscreen.
+The renderer fits the 800x600 game inside the new size with black bars. A
+minimised window reports 0x0, which is ignored.
+*/
+static void fbsize_cb(GLFWwindow *a_window, int a_int_w, int a_int_h)
+{
+	(void)a_window;
+	if (a_int_w > 0 && a_int_h > 0)
+		render_set_viewport(a_int_w, a_int_h);
+}
+
+/*  _________________________________________________________________________ */
+/*! key_cb
+
+@param GLFWwindow*
+Window receiving the event
+
+@param int
+GLFW key token
+
+@param int
+Platform scancode (unused)
+
+@param int
+GLFW_PRESS, GLFW_REPEAT or GLFW_RELEASE
+
+@param int
+Modifier bit-field (shift, ctrl, alt)
+
+@return none
+
+Records one-shot key presses for the main loop: F11 or Alt+Enter toggles
+fullscreen, ESC leaves fullscreen, and ENTER or SPACE asks to start the round
+(only the host in the lobby actually can). The arrow keys are still polled
+every frame by read_direction(), since holding one down means repeated moves.
+*/
+static void key_cb(GLFWwindow *a_window, int a_int_key, int a_int_scancode,
+	int a_int_action, int a_int_mods)
+{
+	(void)a_window;
+	(void)a_int_scancode;
+	if (a_int_action != GLFW_PRESS)
+		return;
+
+	bool b_enter = (a_int_key == GLFW_KEY_ENTER || a_int_key == GLFW_KEY_KP_ENTER);
+	if (a_int_key == GLFW_KEY_F11 || (b_enter && (a_int_mods & GLFW_MOD_ALT)))
+		b_fullscreen_pressed = true;
+	else if (a_int_key == GLFW_KEY_ESCAPE && b_is_fullscreen)
+		b_fullscreen_pressed = true;
+	else if (b_enter || a_int_key == GLFW_KEY_SPACE)
+		b_start_pressed = true;
+}
+
+/*  _________________________________________________________________________ */
+/*! toggle_fullscreen
+
+@param GLFWwindow*
+Window to switch
+
+@return none
+
+Switches between fullscreen (the primary monitor's current mode) and the
+windowed size. The windowed position and size are saved when going
+fullscreen and restored when coming back.
+*/
+static void toggle_fullscreen(GLFWwindow *a_window)
+{
+	GLFWmonitor *monitor = glfwGetPrimaryMonitor();
+	const GLFWvidmode *mode = monitor ? glfwGetVideoMode(monitor) : NULL;
+
+	if (b_is_fullscreen)
+	{
+		glfwSetWindowMonitor(a_window, NULL, int_windowed_x, int_windowed_y,
+			int_windowed_w, int_windowed_h, GLFW_DONT_CARE);
+		b_is_fullscreen = false;
+	}
+	else if (mode)
+	{
+		glfwGetWindowPos(a_window, &int_windowed_x, &int_windowed_y);
+		glfwGetWindowSize(a_window, &int_windowed_w, &int_windowed_h);
+		glfwSetWindowMonitor(a_window, monitor, 0, 0, mode->width, mode->height,
+			mode->refreshRate);
+		b_is_fullscreen = true;
+	}
+
+	// Refit the viewport straight away
+	int int_w = 0, int_h = 0;
+	glfwGetFramebufferSize(a_window, &int_w, &int_h);
+	fbsize_cb(a_window, int_w, int_h);
+}
+
 // Entry point of the application
-int main(void)
+// Usage: ./client [server address ...] - the address is only needed on
+// networks that block DDS's own discovery (see net_config.h)
+int main(int argc, char **argv)
 {
 	if (!security_init())
 	{
 		fprintf(stderr, "security_init failed\n");
+		return 1;
+	}
+
+	// Fixed ports and any peer addresses, for playing across machines -
+	// see net_config.h. Must run before the worker thread creates its DDS
+	// participant
+	if (!net_config_apply(argc - 1, argv + 1))
+	{
+		fprintf(stderr, "usage: %s [server address ...]\n", argv[0]);
 		return 1;
 	}
 
@@ -767,13 +935,25 @@ int main(void)
 
 	// GLFW opens the 800x600 window and reads the keyboard, and OpenGL draws
 	// into it (Slides 7 and 8)
+	// In case a GLFW function fails, report it
+	glfwSetErrorCallback(error_cb);
 	if (!glfwInit())
+	{
+		fprintf(stderr, "GLFW init has failed - abort program\n");
 		return 1;
+	}
+
+	// Fixed-size window: no maximise button to hit by accident. Fullscreen is
+	// a deliberate F11 / Alt+Enter (see key_cb). Hidden until everything is
+	// set up, so it never flashes up half-drawn
+	glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+	glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
 
 	GLFWwindow *window = glfwCreateWindow(WIDTH, HEIGHT,
 		"DDS Client (Click within the window to control)", NULL, NULL);
 	if (!window)
 	{
+		fprintf(stderr, "GLFW unable to create OpenGL context - abort program\n");
 		glfwTerminate();
 		return 1;
 	}
@@ -782,6 +962,18 @@ int main(void)
 	// Wait for the display refresh instead of redrawing as fast as possible
 	glfwSwapInterval(1);
 	render_init();
+
+	// Events: window size changes and the keyboard
+	glfwSetFramebufferSizeCallback(window, fbsize_cb);
+	glfwSetKeyCallback(window, key_cb);
+
+	// We'll use the entire window as the viewport
+	int int_fb_w = 0, int_fb_h = 0;
+	glfwGetFramebufferSize(window, &int_fb_w, &int_fb_h);
+	fbsize_cb(window, int_fb_w, int_fb_h);
+
+	glfwShowWindow(window);
+	glfwFocusWindow(window);
 
 	double d_last_frame = glfwGetTime();
 	// Direction last handed to the worker thread, so the shared ch_dir is
@@ -812,8 +1004,34 @@ int main(void)
 		d_last_frame = d_now;
 
 		snapshot_state(&state);
-		render_frame(&state, f_dt, d_now);
-		glfwSwapBuffers(window);
+
+		if (b_fullscreen_pressed)
+		{
+			b_fullscreen_pressed = false;
+			toggle_fullscreen(window);
+		}
+
+		// ENTER or SPACE starts the round - only offered to the host in the
+		// lobby; the server checks again, this just avoids pointless traffic
+		if (b_start_pressed)
+		{
+			b_start_pressed = false;
+			if (!state.round_started && state.own_id >= 1 &&
+				state.own_id == render_host_id(state.players))
+			{
+				pthread_mutex_lock(&mutex);
+				b_start_requested = true;
+				pthread_mutex_unlock(&mutex);
+				wake_worker();
+			}
+		}
+
+		// Nothing to draw while the window is minimised
+		if (!glfwGetWindowAttrib(window, GLFW_ICONIFIED))
+		{
+			render_frame(&state, f_dt, d_now);
+			glfwSwapBuffers(window);
+		}
 
 		// Cap at about 60 frames per second; vsync is not always honoured
 		// (eg software rendering under WSL), which leaves the loop spinning.

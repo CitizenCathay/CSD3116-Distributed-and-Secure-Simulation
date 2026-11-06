@@ -10,7 +10,7 @@
        positions and the grid of claimed cells), runs the round timer and
        publishes updates to the clients.
 *******************************************************************************/
-/* gcc -O2 -o server server.c security.c game_logic.c grid_logic.c messages.c $(pkg-config --cflags --libs CycloneDDS) $(pkg-config --cflags --libs libcrypto) -pthread
+/* gcc -O2 -o server server.c security.c game_logic.c grid_logic.c net_config.c messages.c $(pkg-config --cflags --libs CycloneDDS) $(pkg-config --cflags --libs libcrypto) -pthread
 (or just `make server`) */
 
 /* Dr Khoo Teck Ping
@@ -40,13 +40,14 @@ watch out for break out of loop */
 #include "dds/dds.h"
 #include "messages.h"
 #include "security.h"
+#include "net_config.h"
 #include "game_logic.h"
 #include "grid_logic.h"
 
 // ### GLOBAL CONSTANTS ###
 /* An array of one message (aka sample in dds terms) will be used. */
 #define MAX_SAMPLES 1
-// The round starts once this many players have joined
+// The host can only start the round once this many players have joined
 #define MIN_PLAYERS 2
 // How long the result stays on screen before a new round starts
 // automatically - no need to restart the server to play again
@@ -387,6 +388,8 @@ typedef struct
 	dds_time_t start_time;
 	dds_time_t game_over_time;
 	dds_time_t last_state_time;
+	// The host pressed start in the lobby. Consumed by update_round()
+	bool b_start_requested;
 } Round;
 
 // Creates a topic, exiting if that fails
@@ -625,6 +628,22 @@ static void take_inputs(const ServerDds *a_dds, Round *a_round)
 		// of being freed by FIRST_INPUT_TIMEOUT_SECS
 		arr_b_input_seen[int_input_player_id - 1] = true;
 
+		// 's' = start the round. Only the host (the lowest active player ID)
+		// may, and only from the lobby; anyone else's request is ignored
+		if (ch_input_dir == 's')
+		{
+			int int_host = 0;
+			for (int i = 0; i < MAX_PLAYERS && int_host == 0; i++)
+			{
+				if (arr_Players[i].b_active)
+					int_host = i + 1;
+			}
+			if (!a_round->b_started && int_input_player_id == int_host)
+				a_round->b_start_requested = true;
+			pthread_mutex_unlock(&mutex);
+			continue;
+		}
+
 		// Compute the move and apply it if legal - see game_logic.h (a
 		// square may not leave the window or overlap another player's
 		// square, Slide 7). Players are frozen once the round is over
@@ -678,11 +697,16 @@ static void update_round(const ServerDds *a_dds, Round *a_round)
 {
 	dds_time_t now = dds_time();
 
-	// Start the round once enough players have joined
+	// Start the round when the host asked for it and enough players are
+	// still here. A request that cannot be honoured is dropped, so it never
+	// fires later by surprise
 	pthread_mutex_lock(&mutex);
 	int int_num_active_temp = int_num_active_players;
 	pthread_mutex_unlock(&mutex);
-	if (!a_round->b_started && int_num_active_temp >= MIN_PLAYERS)
+	bool b_start_now = a_round->b_start_requested && !a_round->b_started &&
+		int_num_active_temp >= MIN_PLAYERS;
+	a_round->b_start_requested = false;
+	if (b_start_now)
 	{
 		a_round->b_started = true;
 		a_round->start_time = now;
@@ -939,7 +963,9 @@ static void *wait_for_quit(void *arg)
 }
 
 // Entry point of the application
-int main(void)
+// Usage: ./server [peer address ...] - addresses are only needed on networks
+// that block DDS's own discovery (see net_config.h)
+int main(int argc, char **argv)
 {
 	// Seed rand(), so that the random numbers are different for each run
 	srand((unsigned int)time(NULL));
@@ -947,6 +973,14 @@ int main(void)
 	if (!security_init())
 	{
 		fprintf(stderr, "security_init failed\n");
+		return 1;
+	}
+
+	// Fixed ports and any peer addresses, for playing across machines -
+	// see net_config.h. Must run before any thread creates a DDS entity
+	if (!net_config_apply(argc - 1, argv + 1))
+	{
+		fprintf(stderr, "usage: %s [peer address ...]\n", argv[0]);
 		return 1;
 	}
 
