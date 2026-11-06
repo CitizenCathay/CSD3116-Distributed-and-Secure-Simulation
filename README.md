@@ -4,9 +4,9 @@ A real-time, distributed and secure multiplayer game for **CSD3116** (Week 1
 Team Lab). Players move squares around a grid and claim every floor cell they
 walk over. Built in C on Cyclone DDS, OpenGL/GLFW and OpenSSL.
 
-- A **60 s round** starts once **2 players** have joined (up to 5).
+- Players gather in a **lobby** (up to 5). Once **2 players** have joined, the host (the lowest player number, so Player 1) presses **ENTER** to start a **60 s round**.
 - Walk over a cell to paint it your colour, even if someone else painted it first.
-- When time runs out, **most cells wins**. A new round starts 5 s later.
+- When time runs out, **most cells wins**. After 5 s everyone returns to the lobby, where the host starts the next round.
 - A 6th player **spectates** and joins automatically when a slot frees up.
 
 ## Quick start
@@ -20,7 +20,7 @@ make            # builds server + client (runs idlc for you)
 ./client        # terminal 2, 3, ... one per player
 ```
 
-Click inside a client window, then use the **arrow keys**. Close the window
+Click inside a client window, then use the **arrow keys**. **F11** (or Alt+Enter) toggles fullscreen and **ESC** leaves it. Close the window
 (or press Ctrl+C) to leave.
 
 ```bash
@@ -64,7 +64,8 @@ The game always uses UDP ports 7400-7451, so that rule is all it needs.
 |---|---|---|
 | **Programs** | `server.c` | Authoritative game server |
 | | `client.c` | One per player: networking, input, main loop |
-| | `render.c` / `.h` | Client drawing (OpenGL) from a state snapshot |
+| | `render.c` / `.h` | Client drawing (OpenGL) from a state snapshot; art comes from `assets/` |
+| **Art** | `assets/*.png` | All sprites and backdrops - see "Art assets" below |
 | **Shared logic** | `game_logic.c` / `.h` | Players: collision, spawning, movement |
 | | `grid_logic.c` / `.h` | Floor: cell claiming, scores, winner, timer |
 | **Security** | `security.c` / `.h` | Authentication and encryption (OpenSSL) |
@@ -72,7 +73,7 @@ The game always uses UDP ports 7400-7451, so that rule is all it needs.
 | **Messages** | `messages.idl` | DDS message definitions (`idlc` generates `messages.c/.h`) |
 | **Tests** | `test_*.c` | Unit tests for the shared logic and security |
 | **Build** | `Makefile` | `make`, `make test`, `make clean` |
-| **Vendored** | `stb_easy_font.h` | Text rendering |
+| **Vendored** | `stb_easy_font.h`, `stb_image.h` | Text rendering; PNG loading (public domain, from github.com/nothings/stb) |
 
 The shared logic, security and networking modules have **no DDS calls or GLFW dependency**, so
 they are unit-tested on their own and used unchanged by both programs.
@@ -171,7 +172,7 @@ time.
 ```mermaid
 stateDiagram-v2
     [*] --> Waiting
-    Waiting --> Running: 2+ players joined
+    Waiting --> Running: host presses ENTER (2+ players)
     Running --> Over: timer hits 0
     Over --> Waiting: after 5 s (cells cleared, players respawned)
 ```
@@ -219,6 +220,7 @@ Headless DDS clients that run against the real server, no windows needed:
 | `make integration` | ~1 min of PASS/FAIL checks: repeated joins get the same slot, silent slots are freed, replayed input is ignored, late joiners see the right players, Ctrl+C shuts the server down cleanly |
 | `make bench` | Builds the pre-optimization commit and the current code side by side in `build/`, then measures both (latency, CPU per thread) |
 | `bash tools/load.sh build/new 20` | Puts a running server under a fixed load (4 idle players + 1 moving) for 20 s, eg while `perf record` or `strace -c` runs |
+| `make sanitize` | Rebuilds everything with AddressSanitizer + UndefinedBehaviorSanitizer, runs the unit and integration tests, and prints how many sanitizer reports were found (details in `sanitizer-logs/`). Removes the sanitized builds afterwards |
 
 To profile, build both versions with symbols (`bash tools/build_versions.sh`
 does this by default), start `build/old/server` or `build/new/server` under
@@ -273,3 +275,119 @@ Measured on WSL2, both builds at `-O2`, against the code before this pass
 
 ThreadSanitizer found no data races in the game code. The client's total CPU
 rises slightly because it now draws about 12% more frames.
+
+### Final build profiling
+
+Measured on the final build (lobby and new graphics) on WSL2, against the same before commit (`5c982eb`). Raw results are in `profiling/`.
+
+| Metric | Tool | Before | After |
+|---|---|---|---|
+| Key press → new position, 2 players | `make bench` | 50.2 ms | **1.2 ms** |
+| Key press → new position, 5 players | `make bench` | 153.6 ms | **1.2 ms** |
+| Server CPU, 5 idle players | `make bench` | 1.8% | **0.2%** |
+| Server wake-ups per second | `perf stat` (context switches) | 863 | **27** |
+| Messages sent, same 5-player test | Wireshark (`rtps` filter) | 1358 | **584** |
+| Client CPU, frame cap + vsync off vs on | `top` | 517% | **174%** |
+
+- Client CPU is measured on the final graphics with only the frame cap and vsync changed. 100% = one CPU core. The new renderer costs more than the old one (about 13% → 189% with the cap on) because it sends hundreds of separate draw calls per frame.
+- The Wireshark captures were taken before the lobby was added. The server sends messages the same way since.
+- `-O3` gave no measurable gain over `-O2`, because the server spends its time waiting on the network.
+- `make sanitize` found DDS sample buffers that were allocated once and never freed, in `server.c`, `client.c`, `tools/bench.c` and `tools/late_joiner.c`. They are now freed, and `make sanitize` reports 0.
+
+---
+
+## Art assets
+
+The client's art is not hardcoded: `render.c` loads PNGs from the `assets/`
+folder at start-up, so you can restyle the game by painting over them. Run the
+client from the repository root (or set `CTF_ASSET_DIR` to the folder). A
+missing file is reported on stderr and drawn as a blank white shape, so the
+game still runs.
+
+Most images are **white or grey on purpose**: the game tints them with each
+player's colour, so one image covers all five players. Keep the file names and
+sizes, and keep the transparent corners transparent.
+
+| File | Size | Used for |
+|---|---|---|
+| `tile.png` | 64x64 | A claimed floor cell, bevel included (owner colour) |
+| `floor.png` | 64x64 | An unclaimed floor cell (faint white) |
+| `player.png` | 64x64 | A player's square (player colour) |
+| `eye.png`, `pupil.png` | 32x32 | The faces on the squares (not tinted) |
+| `crown.png` | 64x48 | Leader / winner / host crown (not tinted) |
+| `panel.png`, `ring.png` | 64x64 | Rounded panels and their outlines; stretched as a 9-slice with 16 px corners |
+| `circle.png` | 64x64 | Dots, swatches, spinner (any colour) |
+| `soft.png` | 64x64 | Blurred blob used as drop shadow and glow |
+| `spark.png` | 64x64 | Sparks and dust puffs (player colour) |
+| `confetti.png` | 16x16 | Confetti (any colour) |
+| `background.png` | 4x256 | Backdrop gradient, stretched over the window |
+| `vignette.png` | 64x4 | Edge darkening, left to right |
+| `hud_bar.png` | 4x64 | Top and bottom HUD strips |
+
+Text still uses the vendored `stb_easy_font.h`; PNGs are read with
+`stb_image.h`.
+
+---
+
+## AI use declaration
+
+**Tool used:** Claude Code (Anthropic).
+### What AI was used for
+
+| Area | What the AI did | Files |
+|---|---|---|
+| Security review | Read `security.c`, `security.h` and `server.c` and summarised what the authentication and encryption cover and what they do not (the shared-key limitation). No code was changed for this | none |
+| Optimization | Added one reusable AES-GCM cipher context per thread (`_Thread_local`, freed at thread exit) in place of creating and freeing a context for every message. Added `-pthread` to the `test_security` and `tools/%` Makefile rules | `security.c`, `Makefile` |
+| Advice only | Suggested further hardening and optimization ideas from the course slides (sanitizer builds, compiler hardening flags, join rate-limiting). These are suggestions and are **not** implemented unless listed above | none |
+
+
+### Prompts used (summary)
+
+- "How is the security aspect of the game?"
+- "How is the cross-machine connection?"
+- "What else can be added for optimization / security?"
+
+### How the AI-assisted code was tested
+
+**Avoiding many tiny allocations (`security.c`).** `security_encrypt` and
+`security_decrypt` used to create and free an OpenSSL cipher context
+(`EVP_CIPHER_CTX_new` / `EVP_CIPHER_CTX_free`) for every message, which is a
+malloc and a free per message. Following Week 9 page 5 ("avoid many tiny
+allocations"), each thread now keeps one encrypt context and one decrypt
+context (`_Thread_local`), created on first use, reused for every later
+message, and freed when the thread exits. The message format, the
+authentication and the replay protection are unchanged. The AI suggested this
+change, the team reviewed it and kept it.
+
+**How it was tested.**
+- `test_security` (`make test`, 42 checks) still passes. It covers round trips,
+  tampered, truncated, oversized and forged ciphertexts, message-type and key
+  binding, replays and key overrides.
+- An 8-thread stress test (20,000 encrypt, decrypt and tamper-rejection rounds
+  per thread) had 0 failures and was clean under AddressSanitizer,
+  UndefinedBehaviorSanitizer (with leak checking) and ThreadSanitizer. This
+  checks that the reused contexts leak nothing and have no data races.
+- Valgrind counted the heap allocations in that test: 1,447,053 before and
+  967,068 after, about 33% fewer (one fewer per encrypt or decrypt).
+
+
+
+### Rachael: profiling, sanitizers and leak fix
+
+| Area | What the AI did | Files |
+|---|---|---|
+| Profiling | Planned the `make bench`, perf, Wireshark and frame cap on/off tests and helped read the results. Rachael ran every test and measurement | `profiling/` |
+| Leak fix | Traced the ASan leak reports to DDS sample buffers that were never freed and added the matching `_free(..., DDS_FREE_ALL)` calls | `server.c`, `client.c`, `tools/bench.c`, `tools/late_joiner.c` |
+| Find and fix | Found that the client rule was missing `net_config.c` after the regine-3 merge | `Makefile` |
+
+Prompts used (summary):
+- "Go through all the files and the assignment. What do I have to do?"
+- "How do I get the perf before/after numbers and the Wireshark graph?"
+- "What if I test it without the frame cap and vsync?"
+- "Do we not need to fix what make sanitize found?"
+
+How it was tested:
+- `make test` (130 checks) and `make integration` pass with the changes.
+- `make sanitize` reports 0. Before the fix it found 6 leak reports, all from the buffers above.
+- The tests open no window, so they don't cover the `client.c` fix. The game was played after the change to check it still starts, plays and closes normally.
+- The `top` CPU method was checked on programs with a known load (1 busy thread read 97%, 4 threads read 399%), and it agrees with `tools/compare.sh`'s method.

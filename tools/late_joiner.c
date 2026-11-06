@@ -60,6 +60,9 @@ int main(void)
 			arr_b_in_game[int_id] = true;
 	}
 
+	// set them all free
+	Position_free(samples[0], DDS_FREE_ALL);
+
 	printf("late joiner sees:");
 	for (int int_id = 1; int_id <= MAX_PLAYERS; int_id++)
 		if (arr_b_in_game[int_id])

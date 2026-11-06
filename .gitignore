@@ -17,6 +17,8 @@ tools/join_test
 tools/late_joiner
 # Side-by-side old/new builds from tools/build_versions.sh
 build/
+# Sanitizer reports from `make sanitize`
+sanitizer-logs/
 
 # Run logs from manual testing
 *.log
